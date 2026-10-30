@@ -1407,8 +1407,9 @@ floci populates:
   is the header's text: an alias or a bare key id is not resolved to an ARN, and a bucket's default
   encryption fills neither key. A part sends neither header and carries what its upload recorded
   when it was created. An upload holds only what its creation asked for, so one created with no
-  encryption carries neither key, where S3 gives it the bucket's default. A part naming an upload
-  floci does not hold answers `NoSuchUpload`, as on AWS, whatever the policy says.
+  encryption carries neither key, where S3 gives it the bucket's default. A part naming an upload floci does
+  not hold answers `NoSuchUpload`, as on AWS, whatever the policy says, unless it copies from a
+  source.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.
