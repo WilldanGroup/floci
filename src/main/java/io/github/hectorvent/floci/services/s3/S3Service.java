@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -1211,6 +1212,12 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeObjectWrite(String bucketName, String key, String action, RequestAuthorization authorization) {
+        authorizeObjectWrite(bucketName, key, action, authorization, null);
+    }
+
+    /** {@code requestConditions}, when present, are the condition keys the request itself offers. */
+    void authorizeObjectWrite(String bucketName, String key, String action, RequestAuthorization authorization,
+                              Map<String, List<String>> requestConditions) {
         if (!enforceAuth) {
             return;
         }
@@ -1221,7 +1228,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
             String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
-            authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization);
+            authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization, requestConditions);
             return;
         }
 
@@ -1341,6 +1348,16 @@ public class S3Service implements Resettable, ResourceProvider {
             String action,
             String resourceArn,
             RequestAuthorization authorization) {
+        authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, authorization, null);
+    }
+
+    private void authorizeSignedBucketPolicy(
+            String bucketName,
+            String key,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization,
+            Map<String, List<String>> requestConditions) {
         if (!isKnownAccessKey(authorization)) {
             throw new AwsException("InvalidAccessKeyId",
                     "The AWS Access Key Id you provided does not exist in our records.", 403);
@@ -1382,7 +1399,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 RequestPrincipal.caller(caller),
                 action,
                 resourceArn,
-                bucketPolicyContext(caller));
+                bucketPolicyContext(caller, requestConditions));
 
         if (decision == ResourcePolicyDecision.EXPLICIT_DENY) {
             throw accessDeniedException(bucketName, key);
@@ -1426,7 +1443,15 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code aws:PrincipalArn} is the role's ARN.
      */
     private static Map<String, List<String>> bucketPolicyContext(CallerArns caller) {
+        return bucketPolicyContext(caller, null);
+    }
+
+    private static Map<String, List<String>> bucketPolicyContext(CallerArns caller,
+                                                                 Map<String, List<String>> requestConditions) {
         Map<String, List<String>> context = new HashMap<>();
+        if (requestConditions != null) {
+            context.putAll(requestConditions);
+        }
         context.put("aws:PrincipalIsAWSService", List.of("false"));
         if (caller != null) {
             caller.putPrincipalKeys(context);
@@ -4444,6 +4469,22 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public MultipartUpload listParts(String bucket, String key, String uploadId) {
         return getMultipartUpload(bucket, key, uploadId);
+    }
+
+    /** The encryption condition keys of an upload's parts and completion: what it recorded when created. */
+    public Map<String, List<String>> multipartEncryptionConditions(String bucket, String key, String uploadId) {
+        MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+        return IamConditionContextResolver.encryptionConditions(upload.getServerSideEncryption(),
+                upload.getSseKmsKeyId());
+    }
+
+    /** Checks a part or a completion against the bucket policy by the encryption its upload recorded. */
+    void authorizeMultipartWrite(String bucket, String key, String uploadId, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+        authorizeObjectWrite(bucket, key, "s3:PutObject", authorization,
+                multipartEncryptionConditions(bucket, key, uploadId));
     }
 
     public MultipartUpload getMultipartUpload(String bucket, String key, String uploadId) {

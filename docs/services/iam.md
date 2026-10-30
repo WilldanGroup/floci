@@ -1400,6 +1400,15 @@ floci populates:
   `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
   omitted or empty tag set still follows the absent-key rules above. Existing object tags
   do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
+- `s3:x-amz-server-side-encryption` and `s3:x-amz-server-side-encryption-aws-kms-key-id`: the
+  encryption a request asks for, for `s3:PutObject`, from the `x-amz-server-side-encryption` and
+  `x-amz-server-side-encryption-aws-kms-key-id` headers of a `PutObject` or `CopyObject`, and of a
+  `CreateMultipartUpload` where S3's own check runs it (`FLOCI_SERVICES_S3_ENFORCE_AUTH`). The value
+  is the header's text: an alias or a bare key id is not resolved to an ARN, and a bucket's default
+  encryption fills neither key. A part sends neither header and carries what its upload recorded
+  when it was created. An upload holds only what its creation asked for, so one created with no
+  encryption carries neither key, where S3 gives it the bucket's default. A part naming an upload
+  floci does not hold answers `NoSuchUpload`, as on AWS, whatever the policy says.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.

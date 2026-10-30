@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.MultipartFormParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -845,7 +846,7 @@ public class S3Controller {
             }
 
             if (uploadId != null && partNumber != null) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeMultipartWrite(bucket, key, uploadId, authorization);
                 int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(
@@ -871,7 +872,8 @@ public class S3Controller {
             }
 
             if (copySource != null && !copySource.isEmpty()) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization,
+                        encryptionConditions(httpHeaders));
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
             }
 
@@ -894,7 +896,8 @@ public class S3Controller {
             String sseCustomerKey = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key");
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
-            s3Service.authorizePutObject(bucket, key, authorization);
+            s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization,
+                    encryptionConditions(httpHeaders));
             requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PUT_OBJECT_SIZE);
             S3Object obj = s3Service.putObject(bucket, key,
                     decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
@@ -1583,7 +1586,8 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
             if (hasQueryParam(uriInfo, "uploads")) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization,
+                        encryptionConditions(httpHeaders));
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
@@ -1634,7 +1638,7 @@ public class S3Controller {
             }
 
             if (uploadId != null) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeMultipartWrite(bucket, key, uploadId, authorization);
                 List<CompletedPart> completedParts = parseCompleteMultipartBody(new String(body, StandardCharsets.UTF_8));
                 List<Integer> partNumbers = completedParts.stream().map(CompletedPart::partNumber).toList();
                 Response preconditionResponse = checkWritePreconditions(bucket, key, ifMatch, ifNoneMatch);
@@ -4548,5 +4552,11 @@ public class S3Controller {
 
     private static boolean isValidLocationConstraint(String value) {
         return "EU".equalsIgnoreCase(value) || AwsRegions.isRegionId(value);
+    }
+
+    private static Map<String, List<String>> encryptionConditions(HttpHeaders httpHeaders) {
+        return IamConditionContextResolver.encryptionConditions(
+                httpHeaders.getHeaderString("x-amz-server-side-encryption"),
+                httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id"));
     }
 }

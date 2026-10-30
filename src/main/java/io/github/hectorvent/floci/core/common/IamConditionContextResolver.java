@@ -67,6 +67,8 @@ public class IamConditionContextResolver {
     public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
     public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
     public static final String REQUEST_OBJECT_TAG_KEYS = "s3:RequestObjectTagKeys";
+    public static final String SERVER_SIDE_ENCRYPTION = "s3:x-amz-server-side-encryption";
+    public static final String SERVER_SIDE_ENCRYPTION_KMS_KEY_ID = "s3:x-amz-server-side-encryption-aws-kms-key-id";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
@@ -230,11 +232,60 @@ public class IamConditionContextResolver {
             // request instead, below.
             case "s3:GetObject", "s3:GetObjectTagging", "s3:GetObjectAcl",
                  "s3:PutObjectAcl", "s3:DeleteObjectTagging" -> s3ExistingObjectTagConditionContext(ctx);
-            case "s3:PutObject" -> s3RequestObjectTagConditionContext(ctx);
+            // A part creates nothing from its own headers, and is judged by the encryption its
+            // upload recorded.
+            case "s3:PutObject" -> ctx.getUriInfo().getQueryParameters().containsKey("uploadId")
+                    ? s3UploadEncryptionConditionContext(ctx)
+                    : merge(s3RequestObjectTagConditionContext(ctx),
+                            encryptionConditions(ctx.getHeaderString("x-amz-server-side-encryption"),
+                                    ctx.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id")));
             case "s3:PutObjectTagging" -> merge(s3ExistingObjectTagConditionContext(ctx),
                     s3PutObjectTaggingBodyConditionContext(ctx));
             default -> null;
         };
+    }
+
+    /**
+     * {@code s3:x-amz-server-side-encryption} and {@code s3:x-amz-server-side-encryption-aws-kms-key-id}
+     * as the request asks for them, each value as sent: an alias or a bare key id is not resolved to an
+     * ARN, and a bucket's default encryption fills neither.
+     */
+    public static Map<String, List<String>> encryptionConditions(String encryption, String kmsKeyId) {
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        if (encryption != null && !encryption.isBlank()) {
+            conditions.put(SERVER_SIDE_ENCRYPTION, List.of(encryption));
+        }
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            conditions.put(SERVER_SIDE_ENCRYPTION_KMS_KEY_ID, List.of(kmsKeyId));
+        }
+        return conditions;
+    }
+
+    /**
+     * The encryption keys of a part: what its upload recorded when it was created, as measured on S3,
+     * since a part sends neither header. An upload not held offers neither.
+     */
+    private Map<String, List<String>> s3UploadEncryptionConditionContext(ContainerRequestContext ctx) {
+        if (!s3Service.isResolvable()) {
+            return null;
+        }
+        String path = ctx.getUriInfo().getPath();
+        try {
+            return s3Service.get().multipartEncryptionConditions(s3BucketName(path), s3ObjectKey(path),
+                    ctx.getUriInfo().getQueryParameters().getFirst("uploadId"));
+        } catch (AwsException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether a request checked as {@code s3:PutObject} is a part of an upload S3 does not hold. There
+     * is no encryption to judge it by, and S3 answers it {@code NoSuchUpload} under a policy on the
+     * encryption keys, as measured.
+     */
+    boolean namesUploadNotHeld(String action, ContainerRequestContext ctx) {
+        return "s3:PutObject".equals(action) && ctx.getUriInfo().getQueryParameters().containsKey("uploadId")
+                && s3UploadEncryptionConditionContext(ctx) == null && s3Service.isResolvable();
     }
 
     /**
