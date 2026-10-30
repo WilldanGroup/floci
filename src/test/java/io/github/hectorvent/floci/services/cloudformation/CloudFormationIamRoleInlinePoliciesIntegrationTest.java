@@ -188,4 +188,66 @@ class CloudFormationIamRoleInlinePoliciesIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    /**
+     * A {@code Policies} element that is {@code Fn::If} stands as the branch its condition picks,
+     * and one that picks {@code AWS::NoValue} is removed before the policies are validated, as
+     * CloudFormation removes it (User Guide, pseudo parameters, AWS::NoValue). Validating the
+     * unresolved element refused the role with "has no PolicyName".
+     */
+    @Test
+    void createStackChoosesConditionalInlinePoliciesAndRemovesNoValue() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String roleName = "cfn-if-role-" + suffix;
+        String stackName = "cfn-if-stack-" + suffix;
+        String template = """
+                {
+                  "Conditions": {
+                    "Kept": {"Fn::Equals": ["a", "a"]},
+                    "Dropped": {"Fn::Equals": ["a", "b"]}
+                  },
+                  "Resources": {
+                    "AppRole": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "RoleName": "%s",
+                        "AssumeRolePolicyDocument": {"Statement": []},
+                        "Policies": [
+                          {"PolicyName": "always", "PolicyDocument": {"Statement": [{
+                            "Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}},
+                          {"Fn::If": ["Kept",
+                            {"PolicyName": "when-kept", "PolicyDocument": {"Statement": [{
+                              "Effect": "Allow", "Action": "sqs:SendMessage", "Resource": "*"}]}},
+                            {"Ref": "AWS::NoValue"}]},
+                          {"Fn::If": ["Dropped",
+                            {"PolicyName": "when-dropped", "PolicyDocument": {"Statement": [{
+                              "Effect": "Allow", "Action": "sns:Publish", "Resource": "*"}]}},
+                            {"Ref": "AWS::NoValue"}]}
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(roleName);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .formParam("Capabilities.member.1", "CAPABILITY_NAMED_IAM")
+                .post("/").then().statusCode(200);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", IAM_AUTH)
+                    .formParam("Action", "ListRolePolicies").formParam("RoleName", roleName)
+                    .post("/").then().statusCode(200)
+                    .body(containsString("always"))
+                    .body(containsString("when-kept"))
+                    .body(not(containsString("when-dropped")));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DeleteStack").formParam("StackName", stackName)
+                    .post("/").then().statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
 }

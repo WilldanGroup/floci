@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
@@ -274,6 +275,86 @@ public class CloudFormationTemplateEngine {
             return resolved;
         }
         return node;
+    }
+
+    /**
+     * A resource's properties with each list element that is an {@code Fn::If} replaced by the
+     * branch its condition picks, and removed where that branch is {@code AWS::NoValue}, so a
+     * provisioner reading a list such as a role's {@code Policies} sees only the elements the
+     * template declares under its conditions. {@code AWS::NoValue} "removes the corresponding
+     * resource property when specified as a return value in the {@code Fn::If} intrinsic function"
+     * (CloudFormation User Guide, Get AWS values using pseudo parameters, AWS::NoValue; Condition
+     * functions, Fn::If). Plain objects and lists are walked; an intrinsic's arguments are left for
+     * the intrinsic to resolve. {@code engine} is asked only for an {@code Fn::If} list element's
+     * branch ({@link #chosenIfBranch}), so properties holding none are returned as they stand, and
+     * an element whose branch it does not name, a malformed {@code Fn::If} among them, is kept as
+     * it stands, so the provisioner refuses it as before.
+     */
+    public static JsonNode withConditionalListElementsChosen(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || engine == null || !holdsConditionalListElement(node)) {
+            return node;
+        }
+        if (node.isArray()) {
+            ArrayNode chosen = JsonNodeFactory.instance.arrayNode();
+            for (JsonNode item : node) {
+                JsonNode element = chosenListElement(item, engine);
+                if (element != null) {
+                    chosen.add(withConditionalListElementsChosen(element, engine));
+                }
+            }
+            return chosen;
+        }
+        ObjectNode walked = JsonNodeFactory.instance.objectNode();
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            walked.set(field.getKey(), withConditionalListElementsChosen(field.getValue(), engine));
+        }
+        return walked;
+    }
+
+    /** Whether a list under {@code node}, outside any intrinsic's arguments, holds an {@code Fn::If} element. */
+    private static boolean holdsConditionalListElement(JsonNode node) {
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (isIf(item) || holdsConditionalListElement(item)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (node.isObject() && !isIntrinsic(node)) {
+            for (JsonNode value : node) {
+                if (holdsConditionalListElement(value)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isIf(JsonNode node) {
+        return node.isObject() && node.size() == 1 && node.has("Fn::If");
+    }
+
+    /** The element a list holds under the conditions: an Fn::If's picked branch, or null for AWS::NoValue. */
+    private static JsonNode chosenListElement(JsonNode element, CloudFormationTemplateEngine engine) {
+        JsonNode current = element;
+        while (isIf(current)) {
+            JsonNode branch = engine.chosenIfBranch(current.get("Fn::If"));
+            if (branch == null) {
+                return current;
+            }
+            current = branch;
+        }
+        boolean noValue = current != element && current.isObject() && current.size() == 1
+                && "AWS::NoValue".equals(current.path("Ref").asText());
+        return noValue ? null : current;
+    }
+
+    /** The branch an {@code Fn::If}'s condition picks, unresolved, or null where it is malformed. */
+    public JsonNode chosenIfBranch(JsonNode ifNode) {
+        return selectIfBranch(ifNode);
     }
 
     private static boolean isIntrinsic(JsonNode node) {

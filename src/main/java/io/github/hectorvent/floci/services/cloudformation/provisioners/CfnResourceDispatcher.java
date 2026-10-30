@@ -93,7 +93,11 @@ public class CfnResourceDispatcher {
         try {
             CfnResourceProvisioner owner = registry.forType(resourceType).orElse(null);
             if (owner != null) {
-                owner.provision(resource, properties,
+                // A list element an Fn::If removed with AWS::NoValue is gone before the owner
+                // validates the list, as CloudFormation removes it.
+                JsonNode declared = CloudFormationTemplateEngine.withConditionalListElementsChosen(
+                        properties, engine);
+                owner.provision(resource, declared,
                         new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress,
                                 priorProperties));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
