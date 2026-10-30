@@ -114,6 +114,8 @@ public class CloudFormationService implements ResourceProvider {
     private final SamTransformProcessor samTransformProcessor;
     private final AwsIncludeProcessor awsIncludeProcessor;
     private final Clock clock;
+    // Null on a service built by hand, as a unit test builds one, which then sends no events.
+    private final CloudFormationEventPublisher eventPublisher;
 
     // Persisted state so stacks survive a restart (criteria #10, #11). The in-memory maps above are
     // the live working copy; these backends are write-through + loaded on startup. Legacy records
@@ -122,12 +124,22 @@ public class CloudFormationService implements ResourceProvider {
     private final AccountAwareStorageBackend<String> exportBackend;
 
 
-    @Inject
     public CloudFormationService(CfnResourceDispatcher dispatcher, S3Service s3Service,
                                  SsmService ssmService, CfnDynamicReferences dynamicReferences,
                                  ObjectMapper objectMapper, EmulatorConfig config,
                                  RegionResolver regionResolver, Clock clock,
                                  StorageFactory storageFactory) {
+        this(dispatcher, s3Service, ssmService, dynamicReferences, objectMapper, config,
+                regionResolver, clock, storageFactory, null);
+    }
+
+    @Inject
+    public CloudFormationService(CfnResourceDispatcher dispatcher, S3Service s3Service,
+                                 SsmService ssmService, CfnDynamicReferences dynamicReferences,
+                                 ObjectMapper objectMapper, EmulatorConfig config,
+                                 RegionResolver regionResolver, Clock clock,
+                                 StorageFactory storageFactory,
+                                 CloudFormationEventPublisher eventPublisher) {
         this.dispatcher = dispatcher;
         this.s3Service = s3Service;
         this.ssmService = ssmService;
@@ -138,6 +150,7 @@ public class CloudFormationService implements ResourceProvider {
         this.samTransformProcessor = new SamTransformProcessor(objectMapper);
         this.awsIncludeProcessor = new AwsIncludeProcessor(objectMapper, s3Service);
         this.clock = clock;
+        this.eventPublisher = eventPublisher;
         this.stackBackend = storageFactory.create(
                 "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {});
         this.exportBackend = storageFactory.create(
@@ -488,6 +501,9 @@ public class CloudFormationService implements ResourceProvider {
                 cs.setStatus("CREATE_COMPLETE");
                 cs.setExecutionStatus("AVAILABLE");
             }
+            // No operation runs on a stack that takes a change set, and what this one records carries
+            // no token: CreateChangeSet's ClientToken is not a ClientRequestToken.
+            target.setClientRequestToken(null);
             target.getChangeSets().put(changeSetName, cs);
             created[0] = cs;
             return target;
@@ -901,8 +917,20 @@ public class CloudFormationService implements ResourceProvider {
      * update equivalent) when their own change set failed - executing it unconditionally is how
      * that failure surfaces on those paths, and floci must still expose it there.
      */
-    public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region) {
-        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), true);
+    public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region,
+                                                String clientRequestToken) {
+        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), true,
+                clientRequestToken);
+    }
+
+    /**
+     * The execute {@code CreateStack} and {@code UpdateStack} run, as
+     * {@link #executeChangeSet(String, String, String)}, for a request that carries a token.
+     */
+    public Future<?> executeChangeSetWithToken(String stackName, String changeSetName, String region,
+                                               String clientRequestToken) {
+        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), false,
+                clientRequestToken);
     }
 
     /**
@@ -920,7 +948,7 @@ public class CloudFormationService implements ResourceProvider {
      * refuses one that is already executing or has already executed.
      */
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
-        return claimAndSubmitExecution(stackName, changeSetName, region, accountId, false);
+        return claimAndSubmitExecution(stackName, changeSetName, region, accountId, false, null);
     }
 
     private record ClaimedExecution(ChangeSet changeSet, boolean isCreate) {}
@@ -934,7 +962,8 @@ public class CloudFormationService implements ResourceProvider {
 
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
-                                              String accountId, boolean requireAvailable) {
+                                              String accountId, boolean requireAvailable,
+                                              String clientRequestToken) {
         String canonicalStackName = getStackForChangeSet(stackNameOrArn, changeSetName, region,
                 accountId).getStackName();
 
@@ -969,6 +998,7 @@ public class CloudFormationService implements ResourceProvider {
                     }
                 }
             }
+            existing.setClientRequestToken(clientRequestToken);
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
             existing.setLastUpdatedTime(now());
             addEvent(existing, existing.getStackName(), existing.getStackId(),
@@ -1037,6 +1067,15 @@ public class CloudFormationService implements ResourceProvider {
      *         removal) can await it.
      */
     public Future<?> deleteStack(String stackName, String region, String accountId) {
+        return deleteStack(stackName, region, accountId, null);
+    }
+
+    /** The {@code DeleteStack} operation, in the caller's account, for a request that may carry a token. */
+    public Future<?> deleteStackForRequest(String stackName, String region, String clientRequestToken) {
+        return deleteStack(stackName, region, regionResolver.getAccountId(), clientRequestToken);
+    }
+
+    private Future<?> deleteStack(String stackName, String region, String accountId, String clientRequestToken) {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region, accountId);
         if (stack == null) {
@@ -1061,6 +1100,7 @@ public class CloudFormationService implements ResourceProvider {
                             + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
         StackMutationSnapshot snapshot = snapshot(stack);
+        stack.setClientRequestToken(clientRequestToken);
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
@@ -1092,6 +1132,12 @@ public class CloudFormationService implements ResourceProvider {
      */
     public Future<?> continueUpdateRollback(
             String stackNameOrArn, List<String> resourcesToSkip, boolean forceRollback, String region) {
+        return continueUpdateRollback(stackNameOrArn, resourcesToSkip, forceRollback, region, null);
+    }
+
+    public Future<?> continueUpdateRollback(
+            String stackNameOrArn, List<String> resourcesToSkip, boolean forceRollback, String region,
+            String clientRequestToken) {
         validateContinueUpdateRollback(stackNameOrArn, resourcesToSkip);
         if (forceRollback && !resourcesToSkip.isEmpty()) {
             throw new AwsException("ValidationError", FORCE_WITH_SKIPS, 400);
@@ -1112,6 +1158,7 @@ public class CloudFormationService implements ResourceProvider {
                 throw new AwsException("ValidationError", CONTINUE_ROLLBACK_REFUSED, 400);
             }
             snapshot[0] = snapshot(existing);
+            existing.setClientRequestToken(clientRequestToken);
             existing.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
             addEvent(existing, existing.getStackName(), existing.getStackId(),
                     "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
@@ -2058,7 +2105,17 @@ public class CloudFormationService implements ResourceProvider {
         String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
         stack.setStatus(failStatus);
         stack.setStatusReason(failedResource.getStatusReason());
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
+        if (isCreate && stack.getParentId() != null) {
+            // CloudFormation reports a nested stack's failed create as CREATE_FAILED and its rollback
+            // as the delete its parent's rollback gives it; the nested stack has no ROLLBACK_* status.
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", failStatus, failedResource.getStatusReason());
+            stack.setLastUpdatedTime(now());
+            persistStack(stack);
+            return;
+        }
+        // Kept in DescribeStackEvents, and never sent to the bus: CloudFormation goes straight to the rollback.
+        recordEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", failStatus, failedResource.getStatusReason());
         LOG.warnv("Stack {0} resource {1} failed: {2}", stack.getStackName(),
                 failedResource.getLogicalId(), failedResource.getStatusReason());
@@ -2287,7 +2344,7 @@ public class CloudFormationService implements ResourceProvider {
                     stack, previousState.resources(), owed, region);
             stack.setUpdateRollbackResourceIds(List.copyOf(rollbackFailures));
             finishUpdateRollback(stack, region, previousState, rollbackFailures,
-                    forceRollback && !skips.isEmpty() ? FORCED_ROLLBACK_COMPLETE_REASON : null);
+                    forceRollback && !skips.isEmpty() ? FORCED_ROLLBACK_COMPLETE_REASON : null, false);
         } catch (Exception e) {
             // Nobody reads this worker's future: a stack left UPDATE_ROLLBACK_IN_PROGRESS here could
             // never be continued. The snapshot and the resources still owed a rollback are kept.
@@ -2345,14 +2402,15 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
-        finishUpdateRollback(stack, region, previousState, rollbackFailures, null);
+        finishUpdateRollback(stack, region, previousState, rollbackFailures, null, true);
     }
 
     /**
      * Ends an update rollback, the first one and every ContinueUpdateRollback retry alike: restores
      * the parameters, outputs and exports, and the template once every resource rolled back, then
      * settles the stack in UPDATE_ROLLBACK_COMPLETE, with {@code completionReason} as its reason, or
-     * UPDATE_ROLLBACK_FAILED. A rollback that fails keeps the snapshot and the resources still owed
+     * UPDATE_ROLLBACK_FAILED. The first rollback reports UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS on
+     * the way, as CloudFormation was read to; a retry was not read. A rollback that fails keeps the snapshot and the resources still owed
      * a rollback on the stack for a retry.
      */
     private void finishUpdateRollback(
@@ -2360,7 +2418,8 @@ public class CloudFormationService implements ResourceProvider {
             String region,
             StackUpdateSnapshot previousState,
             List<String> rollbackFailures,
-            String completionReason) {
+            String completionReason,
+            boolean reportsCleanup) {
         List<String> owedResourceIds = List.copyOf(rollbackFailures);
         // Parameters are independent of resource-rollback outcome - always restore them to the last
         // successfully deployed values, even when resource rollback itself fails and the stack lands
@@ -2388,6 +2447,11 @@ public class CloudFormationService implements ResourceProvider {
         if (rollbackFailures.isEmpty()) {
             stack.setUpdateRollbackSnapshot(null);
             stack.setUpdateRollbackResourceIds(null);
+            if (reportsCleanup) {
+                stack.setStatus("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS");
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", null);
+            }
             // Reason and event before the status, which is the volatile publishing write.
             stack.setStatusReason(completionReason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -3262,9 +3326,14 @@ public class CloudFormationService implements ResourceProvider {
         }
         if (childCreate) {
             childStack = newStack(childStackName, region, accountId);
+            childStack.setParentId(parentStack.getStackId());
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
+        } else {
+            childStack.setStatus("UPDATE_IN_PROGRESS");
         }
+        addEvent(childStack, childStack.getStackName(), childStack.getStackId(),
+                "AWS::CloudFormation::Stack", childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
 
         Map<String, String> childParams = new LinkedHashMap<>();
         if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
@@ -3314,6 +3383,16 @@ public class CloudFormationService implements ResourceProvider {
 
     private void addEvent(Stack stack, String logicalId, String physicalId,
                           String resourceType, String status, String reason) {
+        recordEvent(stack, logicalId, physicalId, resourceType, status, reason);
+        // A stack's own record: a parent's record of a nested stack has the resource's logical id.
+        if (eventPublisher != null && stack.getStackName().equals(logicalId)
+                && stack.getStackId().equals(physicalId)) {
+            eventPublisher.stackStatusChanged(stack, ownerAccount(stack), status, reason);
+        }
+    }
+
+    private void recordEvent(Stack stack, String logicalId, String physicalId,
+                             String resourceType, String status, String reason) {
         StackEvent event = new StackEvent();
         event.setStackId(stack.getStackId());
         event.setStackName(stack.getStackName());
