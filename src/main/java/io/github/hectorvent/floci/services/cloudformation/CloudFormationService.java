@@ -2029,11 +2029,15 @@ public class CloudFormationService implements ResourceProvider {
             String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
             stack.setStatus(failStatus);
             stack.setStatusReason(e.getMessage());
-            addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", failStatus, e.getMessage());
             if (isCreate) {
+                // No rollback follows, so the bus hears how the stack ended.
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", failStatus, e.getMessage());
                 persistStack(stack);
             } else {
+                // Kept in DescribeStackEvents, and never sent to the bus: CloudFormation goes straight to the rollback.
+                recordEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", failStatus, e.getMessage());
                 rollbackFailedUpdate(
                         stack, region, previousState, attemptedResourceIds, e.getMessage());
             }
