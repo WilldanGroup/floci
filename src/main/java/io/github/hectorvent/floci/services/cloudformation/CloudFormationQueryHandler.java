@@ -185,8 +185,10 @@ public class CloudFormationQueryHandler {
 
     private Response deleteStack(MultivaluedMap<String, String> params, String region) {
         String stackName = params.getFirst("StackName");
+        List<String> retainResources = extractList(params, "RetainResources.member.");
         try {
-            cfnService.deleteStackForRequest(stackName, region, params.getFirst("ClientRequestToken"));
+            cfnService.deleteStackForRequest(stackName, retainResources, region,
+                    params.getFirst("ClientRequestToken"));
             String xml = new XmlBuilder()
                     .start("DeleteStackResponse", CF_NS)
                     .raw(AwsQueryResponse.responseMetadata())

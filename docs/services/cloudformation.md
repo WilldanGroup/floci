@@ -11,7 +11,7 @@
 | `DescribeStacks` | Get stack status, parameters, and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
-| `DeleteStack` | Delete a stack and its resources |
+| `DeleteStack` | Delete a stack and its resources, keeping those named in `RetainResources` once a delete has failed (see [Deletion Policies](#deletion-policies)) |
 | `ContinueUpdateRollback` | Retry the rollback of a stack in `UPDATE_ROLLBACK_FAILED`, optionally skipping resources or forcing past every failed one (see [Failed update rollbacks](#failed-update-rollbacks)) |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
@@ -1072,6 +1072,12 @@ statuses:
 Resources in any other status (`DELETE_COMPLETE`, `DELETE_SKIPPED`, an in-progress status) and
 resources without a physical id are skipped. A resource that cannot be deleted leaves the stack in
 `DELETE_FAILED`, named in the status reason.
+
+A `DELETE_FAILED` stack can be deleted again with `RetainResources` naming the resources to keep:
+they stay in place and are reported as `DELETE_SKIPPED`, and the rest are deleted. As on AWS, the
+parameter is refused when the stack is in any other status, when it names a resource the stack does
+not have or has already deleted, or when it names one twice. A retry while that delete is still
+running must repeat the same list in the same order.
 
 Deviations from AWS to be aware of:
 
