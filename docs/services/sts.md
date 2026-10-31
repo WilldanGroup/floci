@@ -90,7 +90,38 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 
 The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 
-By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM, and no request reaches any issuer. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+
+### Declared issuers
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a token from an issuer Floci does not host is admitted only from an issuer the role's account declares with `CreateOpenIDConnectProvider` or `AWS::IAM::OIDCProvider`, the provider's URL equal to the token's `iss`. Floci reads the issuer's keys on each call, with no cache: `<iss>/.well-known/openid-configuration`, whose `issuer` must equal `iss`, then the key set at its `jwks_uri`, over https, following no redirect, with five seconds for each request. It then enforces:
+
+- the RS256 signature, against the key the token's `kid` names; with no `kid`, against the set's only RSA key
+- `aud` holds one of the provider's client IDs
+- `exp` / `nbf`, with 60s of clock-skew tolerance
+- the role's trust policy, as above
+
+The response carries the matched client ID in `Audience` and `iss` in `Provider`.
+
+The issuer's certificate is trusted as IAM trusts it: a chain the JVM's default trust store accepts is enough, and otherwise a certificate in the chain must match one of the provider's thumbprints, the hex SHA-1 compared without regard to case. A self-signed certificate counts, by its own thumbprint, which is Floci's reading of "the X.509 certificate used by the domain". The certificate must name the issuer's host either way.
+
+Every other token is refused with HTTP 400 and what real STS answered when measured on `sts.us-east-1.amazonaws.com`. The checks run in this order, so a token failing two gets the earlier answer:
+
+| Token | Code | Message |
+| --- | --- | --- |
+| not a JWT, or a JWT with no `iss` | `InvalidIdentityToken` | `The ID Token provided is not a valid JWT. (You may see this error if you sent an Access Token)` |
+| `iss` does not begin with `https://` | `InvalidIdentityToken` | `Issuer must start with https://` |
+| no provider in the role's account declares `iss` | `InvalidIdentityToken` | `The web identity token provided could not be validated. See the AssumeRoleWithWebIdentity documentation for requirements.` |
+| past its `exp` | `ExpiredTokenException` | `Token expired: current date/time <now> must be before the expiration date/time <exp>`, both in epoch seconds |
+| `alg: none` | `InvalidIdentityToken` | `We don't accept unsigned JWTs` |
+| `aud` holds no client ID of the provider | `InvalidIdentityToken` | the same "could not be validated" message |
+| the keys can't be read, the certificate is not trusted, or the document names another `issuer` | `InvalidIdentityToken` | `Couldn't retrieve verification key from your identity provider,  please reference AssumeRoleWithWebIdentity documentation for requirements`, with two spaces after the comma |
+| a `kid` the set does not hold, or no `kid` among several keys | `InvalidIdentityToken` | the same "Couldn't retrieve" message |
+| a signature that does not verify | `InvalidIdentityToken` | the same "could not be validated" message |
+
+A role that does not exist answers `AccessDenied` (403) after the provider lookup and before any request to the issuer, and a good token the trust policy refuses answers `AccessDenied` too. An algorithm other than RS256, a token before its `nbf`, and a token with no `exp` or `sub` answer "could not be validated". These, and a good signature with an unlisted `aud`, were not measured, since no token an issuer really signed could be had for the measurement.
+
+An issuer Floci hosts keeps the path above even when a provider declares it too, so a cluster's token makes no request and still requires `sts.amazonaws.com`.
 
 ## Examples
 

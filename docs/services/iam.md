@@ -276,8 +276,11 @@ A provider holds at most 100 client IDs (`LimitExceeded` beyond that) and 5 thum
 (`InvalidInput` beyond that). Adding a client ID that is already present, and removing one that
 was never added, both succeed and change nothing, as they do on AWS.
 
-Thumbprints are stored and echoed back but never validated against the remote endpoint, since
-nothing here performs the TLS handshake they describe.
+Thumbprints are not checked when they are declared. Under IAM enforcement they decide whether
+`AssumeRoleWithWebIdentity` trusts an issuer whose certificate the JVM's default trust store refuses:
+see [declared issuers](sts.md#declared-issuers). A template declares a provider with
+`AWS::IAM::OIDCProvider`, from `Url`, `ClientIdList`, `ThumbprintList` and `Tags`; `Ref` and
+`Fn::GetAtt Arn` give its ARN, a changed `Url` replaces it, and the rest change in place.
 
 ### SAML Identity Providers
 

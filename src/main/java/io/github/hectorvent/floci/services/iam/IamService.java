@@ -4214,6 +4214,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "OpenIDConnect Provider not found for arn " + arn, 404));
     }
 
+    /**
+     * The provider {@code accountId} declares for {@code issuer}, an {@code https://} URL, looked up
+     * by the ARN {@link #createOpenIDConnectProvider} derives from it. Providers are
+     * account-namespaced, and {@code AssumeRoleWithWebIdentity} is unsigned, so the caller names the
+     * account, the role's, rather than taking the request's.
+     */
+    public Optional<OpenIDConnectProvider> findOpenIDConnectProvider(String partition, String accountId,
+                                                                     String issuer) {
+        String arn = AwsArnUtils.Arn.global(partition, "iam", accountId,
+                "oidc-provider/" + issuer.substring("https://".length())).toString();
+        if (oidcProviders instanceof AccountAwareStorageBackend<OpenIDConnectProvider> aware) {
+            return aware.getForAccount(accountId, arn);
+        }
+        return oidcProviders.get(arn);
+    }
+
     public List<OpenIDConnectProvider> listOpenIDConnectProviders() {
         return oidcProviders.scan(k -> true);
     }
