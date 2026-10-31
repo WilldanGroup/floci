@@ -485,6 +485,9 @@
     "Description",
     "Path"
   ],
+  "AWS::IAM::OIDCProvider": [
+    "Url"
+  ],
   "AWS::IAM::Policy": [],
   "AWS::IAM::Role": [
     "Path",

@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -70,6 +71,7 @@ public class StsQueryHandler {
     private final WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator;
     private final WebIdentityTokenVerifier tokenVerifier;
     private final OidcIssuerKeyLookup oidcIssuerKeys;
+    private final OidcProviderKeyReader oidcProviderKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
     private final DelegationRequestService delegationRequestService;
@@ -92,14 +94,15 @@ public class StsQueryHandler {
                            WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                            WebIdentityTokenVerifier tokenVerifier,
                            OidcIssuerKeyLookup oidcIssuerKeys,
+                           OidcProviderKeyReader oidcProviderKeys,
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
                            CentralRootAccess centralRootAccess,
                            WebIdentityTokenIssuer tokenIssuer) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
-                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, tokenIssuer, Clock.systemUTC());
+                tokenVerifier, oidcIssuerKeys, oidcProviderKeys, samlProviderService, samlTrustEvaluator,
+                delegationRequestService, centralRootAccess, tokenIssuer, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -107,6 +110,7 @@ public class StsQueryHandler {
                     WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                     WebIdentityTokenVerifier tokenVerifier,
                     OidcIssuerKeyLookup oidcIssuerKeys,
+                    OidcProviderKeyReader oidcProviderKeys,
                     SAMLProviderService samlProviderService,
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
                     DelegationRequestService delegationRequestService,
@@ -121,6 +125,7 @@ public class StsQueryHandler {
         this.webIdentityTrustEvaluator = webIdentityTrustEvaluator;
         this.tokenVerifier = tokenVerifier;
         this.oidcIssuerKeys = oidcIssuerKeys;
+        this.oidcProviderKeys = oidcProviderKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
         this.delegationRequestService = delegationRequestService;
@@ -448,15 +453,13 @@ public class StsQueryHandler {
         Optional<String> issuer = tokenVerifier.peekIssuer(token);
         if (issuer.isEmpty()) {
             return config.services().iam().enforcementEnabled()
-                    ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
-                    "The web identity token does not identify a trusted issuer.", AwsNamespaces.STS, 400))
+                    ? WebIdentityOutcome.deny(invalidIdentityToken(WebIdentityTokenVerifier.NOT_A_JWT))
                     : WebIdentityOutcome.unverifiable();
         }
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
         if (key.isEmpty()) {
             return config.services().iam().enforcementEnabled()
-                    ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
-                    "The web identity token issuer is not trusted.", AwsNamespaces.STS, 400))
+                    ? verifyDeclaredIssuerToken(token, issuer.get(), roleName, roleAccountId, roleArn)
                     : WebIdentityOutcome.unverifiable();
         }
 
@@ -480,25 +483,75 @@ public class StsQueryHandler {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
-        String issuerKeyPrefix = stripScheme(issuer.get());
+        // verify() already required the audience list to contain STS_AUDIENCE.
+        return allowedByTrustPolicy(claims, STS_AUDIENCE, role.get(), roleAccountId, roleArn);
+    }
+
+    /**
+     * Verifies a token from an issuer Floci does not host, under IAM enforcement: the role's account
+     * must declare the issuer as an OIDC provider, and its keys are read from there. The role is
+     * required before anything is read, so a call naming no real role makes no request.
+     */
+    private WebIdentityOutcome verifyDeclaredIssuerToken(String token, String issuer, String roleName,
+                                                         String roleAccountId, String roleArn) {
+        if (!issuer.startsWith("https://")) {
+            return WebIdentityOutcome.deny(invalidIdentityToken(WebIdentityTokenVerifier.ISSUER_NOT_HTTPS));
+        }
+        String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
+        Optional<OpenIDConnectProvider> declared =
+                iamService.findOpenIDConnectProvider(partition, roleAccountId, issuer);
+        if (declared.isEmpty()) {
+            return WebIdentityOutcome.deny(invalidIdentityToken(WebIdentityTokenVerifier.NOT_VALIDATED));
+        }
+        OpenIDConnectProvider provider = declared.get();
+
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        if (role.isEmpty() || !IamService.roleArnMatches(roleArn, role.get())) {
+            return WebIdentityOutcome.deny(accessDenied(roleArn));
+        }
+
+        WebIdentityToken claims;
+        try {
+            claims = tokenVerifier.verifyDeclared(token, provider.getClientIdList(),
+                    kid -> oidcProviderKeys.findKey(issuer, provider.getThumbprintList(), kid));
+        } catch (WebIdentityTokenVerifier.ExpiredTokenException e) {
+            return WebIdentityOutcome.deny(AwsQueryResponse.error("ExpiredTokenException",
+                    e.getMessage(), AwsNamespaces.STS, 400));
+        } catch (WebIdentityTokenVerifier.InvalidTokenException e) {
+            LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
+            return WebIdentityOutcome.deny(invalidIdentityToken(e.getMessage()));
+        }
+
+        // verifyDeclared() already required the audience list to hold one of the client IDs.
+        String clientId = claims.audiences().stream()
+                .filter(provider.getClientIdList()::contains).findFirst().orElseThrow();
+        return allowedByTrustPolicy(claims, clientId, role.get(), roleAccountId, roleArn);
+    }
+
+    private WebIdentityOutcome allowedByTrustPolicy(WebIdentityToken claims, String audience, IamRole role,
+                                                    String roleAccountId, String roleArn) {
+        String issuerKeyPrefix = stripScheme(claims.issuer());
         // The provider is an IAM resource of the role's account, so it shares the role's partition.
         String oidcProviderArn = AwsArnUtils.Arn.global(
-                AwsArnUtils.partitionOrDefault(role.get().getArn(), regionResolver.getPartition()),
+                AwsArnUtils.partitionOrDefault(role.getArn(), regionResolver.getPartition()),
                 "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Map<String, List<String>> conditionClaims = Map.of(
                 "sub", List.of(claims.subject()),
                 "aud", claims.audiences());
 
-        if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
+        if (!webIdentityTrustEvaluator.allows(role.getAssumeRolePolicyDocument(),
                 oidcProviderArn, issuerKeyPrefix, conditionClaims)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
-        // verify() already required the audience list to contain STS_AUDIENCE.
         return WebIdentityOutcome.allow(
-                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE), role.get());
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), audience), role);
+    }
+
+    private static Response invalidIdentityToken(String message) {
+        return AwsQueryResponse.error("InvalidIdentityToken", message, AwsNamespaces.STS, 400);
     }
 
     /**

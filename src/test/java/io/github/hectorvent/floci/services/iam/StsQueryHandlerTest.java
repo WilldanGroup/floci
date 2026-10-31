@@ -113,6 +113,7 @@ class StsQueryHandlerTest {
                 mock(WebIdentityTrustPolicyEvaluator.class),
                 mock(WebIdentityTokenVerifier.class),
                 mock(OidcIssuerKeyLookup.class),
+                mock(OidcProviderKeyReader.class),
                 mock(SAMLProviderService.class),
                 mock(SAMLTrustPolicyEvaluator.class),
                 delegation,
@@ -800,8 +801,8 @@ class StsQueryHandlerTest {
 
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
-                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
-                mock(DelegationRequestService.class), mock(CentralRootAccess.class),
+                trust, verifier, keys, mock(OidcProviderKeyReader.class), mock(SAMLProviderService.class),
+                mock(SAMLTrustPolicyEvaluator.class), mock(DelegationRequestService.class), mock(CentralRootAccess.class),
                 mock(WebIdentityTokenIssuer.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);

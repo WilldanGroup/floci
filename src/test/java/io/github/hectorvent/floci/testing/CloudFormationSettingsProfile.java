@@ -15,7 +15,9 @@ import java.util.Map;
  *   resource type Floci has no provisioner for instead of stubbing it.
  *   {@code CloudFormationUnsupportedResourceTypeStrictIntegrationTest} relies on it.
  *   {@code ApiGatewayV2DomainCfnIntegrationTest} runs under it too, so that a type nothing
- *   provisions would fail its stacks instead of passing as a stub; it passes without it.</li>
+ *   provisions would fail its stacks instead of passing as a stub; it passes without it.
+ *   {@code CloudFormationIamOidcProviderIntegrationTest} relies on it, so a provider nothing
+ *   provisions fails its stack.</li>
  *   <li>{@code floci.services.cloudformation.allow-stub-lambda-code=true} gives a Lambda function
  *   whose code in S3 cannot be read the built-in stub handler instead of failing it.
  *   {@code CloudFormationLambdaStubCodeAllowedIntegrationTest} relies on it.</li>

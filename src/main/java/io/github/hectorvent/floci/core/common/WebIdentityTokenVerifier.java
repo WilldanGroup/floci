@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * Verifies RS256-signed web-identity JWTs against a Floci-known OIDC issuer.
@@ -36,6 +37,17 @@ public class WebIdentityTokenVerifier {
 
     /** Tolerance for clock drift between Floci and a token minted elsewhere. */
     private static final long CLOCK_SKEW_SECONDS = 60;
+
+    // What real STS answered for each refusal of a token from an issuer Floci does not host, measured
+    // on sts.us-east-1.amazonaws.com. The two spaces after the comma are in AWS's answer.
+    public static final String NOT_A_JWT =
+            "The ID Token provided is not a valid JWT. (You may see this error if you sent an Access Token)";
+    public static final String ISSUER_NOT_HTTPS = "Issuer must start with https://";
+    public static final String NOT_VALIDATED = "The web identity token provided could not be validated. "
+            + "See the AssumeRoleWithWebIdentity documentation for requirements.";
+    private static final String UNSIGNED = "We don't accept unsigned JWTs";
+    private static final String KEY_NOT_RETRIEVED = "Couldn't retrieve verification key from your identity provider,  "
+            + "please reference AssumeRoleWithWebIdentity documentation for requirements";
 
     private final ObjectMapper objectMapper;
 
@@ -122,6 +134,59 @@ public class WebIdentityTokenVerifier {
         }
 
         return new WebIdentityToken(issuer, subject, audiences);
+    }
+
+    /**
+     * Fully verifies {@code token}, a parseable JWT from an issuer declared as an OIDC provider, in
+     * the order real STS was measured to check: its expiry, an unsigned token, and the audience
+     * against {@code clientIds}, none of which needs the issuer, and only then the key
+     * {@code keyByKid} finds for its {@code kid}, which may be null, and the signature under it.
+     *
+     * <p>An algorithm other than RS256, a token before its {@code nbf}, and one with no {@code exp}
+     * or {@code sub} are cases the measurement did not reach, and answer as a bad signature does.
+     */
+    public WebIdentityToken verifyDeclared(String token, List<String> clientIds,
+                                           Function<String, Optional<RSAPublicKey>> keyByKid)
+            throws InvalidTokenException {
+        String[] parts = token.split("\\.", -1);
+        JsonNode header = decodeJson(parts[0]).orElseThrow(() -> new InvalidTokenException(NOT_VALIDATED));
+        JsonNode claims = decodeJson(parts[1]).orElseThrow(() -> new InvalidTokenException(NOT_VALIDATED));
+
+        long now = Instant.now().getEpochSecond();
+        JsonNode exp = claims.get("exp");
+        if (exp != null && exp.isNumber() && now > exp.asLong() + CLOCK_SKEW_SECONDS) {
+            throw new ExpiredTokenException("Token expired: current date/time " + now
+                    + " must be before the expiration date/time " + exp.asLong());
+        }
+
+        String alg = header.path("alg").asText("");
+        if ("none".equals(alg)) {
+            throw new InvalidTokenException(UNSIGNED);
+        }
+
+        List<String> audiences = readAudiences(claims);
+        if (audiences.stream().noneMatch(clientIds::contains) || !"RS256".equals(alg)) {
+            throw new InvalidTokenException(NOT_VALIDATED);
+        }
+
+        RSAPublicKey key = keyByKid.apply(header.path("kid").asText(null))
+                .orElseThrow(() -> new InvalidTokenException(KEY_NOT_RETRIEVED));
+        if (!signatureValid(parts[0] + "." + parts[1], parts[2], key)) {
+            throw new InvalidTokenException(NOT_VALIDATED);
+        }
+
+        try {
+            verifyValidityWindow(claims);
+        } catch (InvalidTokenException e) {
+            LOG.debugv("Refusing a declared issuer's token: {0}", e.getMessage());
+            throw new InvalidTokenException(NOT_VALIDATED);
+        }
+        String subject = claims.path("sub").asText(null);
+        if (subject == null || subject.isBlank()) {
+            throw new InvalidTokenException(NOT_VALIDATED);
+        }
+
+        return new WebIdentityToken(claims.path("iss").asText(), subject, audiences);
     }
 
     private void verifyValidityWindow(JsonNode claims) throws InvalidTokenException {
