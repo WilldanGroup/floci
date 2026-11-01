@@ -8,7 +8,8 @@
 // Protocol (JSON over HTTP, one request per handler call):
 //   GET  /health    -> {"ok":true,"runtime":"<node version>"}
 //   POST /evaluate  <- {"code":"<module source>","handler":"request"|"response","context":{...}}
-//                   -> {"ok":true,"result":<json>,"stash":{...},"earlyReturn":<bool>,"errors":[...]}
+//                   -> {"ok":true,"result":<json>,"stash":{...},"earlyReturn":<bool>,
+//                       "skipTo":"END"|"NEXT"|null,"errors":[...]}
 //                   -> {"ok":false,"error":{"message","type","data","errorInfo","stack"}}
 //
 // Resolver modules are written to disk under a content hash and imported, so Node's own module
@@ -55,10 +56,11 @@ class TemplateError extends Error {
 }
 
 class EarlyReturn extends Error {
-  constructor(value) {
+  constructor(value, skipTo) {
     super('early return');
     this[RETURN_MARKER] = true;
     this.value = value ?? null;
+    this.skipTo = skipTo ?? null;
   }
 }
 
@@ -189,7 +191,7 @@ export const util = {
 };
 
 export const runtime = {
-  earlyReturn(value) { throw new EarlyReturn(value); }
+  earlyReturn(value, returnOptions) { throw new EarlyReturn(value, returnOptions?.skipTo); }
 };
 
 export const extensions = {
@@ -618,6 +620,7 @@ async function evaluate(body) {
       result: result === undefined ? null : result,
       stash: ctx.stash,
       earlyReturn: false,
+      skipTo: null,
       errors: [...utilsModule.appendedErrors]
     };
   } catch (error) {
@@ -627,6 +630,7 @@ async function evaluate(body) {
         result: error.value,
         stash: ctx.stash,
         earlyReturn: true,
+        skipTo: error.skipTo,
         errors: [...utilsModule.appendedErrors]
       };
     }

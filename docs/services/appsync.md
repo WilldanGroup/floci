@@ -435,8 +435,13 @@ request / data source / response, then its `response()` as the after step.
 - `ctx.stash` is threaded through every stage, so the before step can hand work to the functions.
 - Each stage sees the previous one's return value as `ctx.prev.result`.
 - A function that exports no `response()` passes its data source result straight through.
-- `runtime.earlyReturn(value)` makes `value` the field's result immediately, skipping every
-  remaining stage including the after step.
+- `runtime.earlyReturn(value, {skipTo})` skips the rest of the stage that called it, and `value`
+  is that stage's result. From a UNIT resolver's handler or the after step, it is the field's
+  result. From the before step, the functions are skipped and the after step runs with `value` as
+  `ctx.prev.result`; `skipTo: 'NEXT'` runs the functions instead. From a function's `request()`,
+  its data source and `response()` are skipped, and from its `response()`, the rest of it; either
+  way the next function runs with `value` as `ctx.prev.result`, or the after step after the last,
+  and `skipTo: 'END'` goes straight to the after step.
 - `util.error(...)` fails the field, carrying the resolver's own `errorType`, `errorInfo` and `data`
   onto the GraphQL error.
 - `util.appendError(...)` stops nothing: the errors are returned **beside** the data.

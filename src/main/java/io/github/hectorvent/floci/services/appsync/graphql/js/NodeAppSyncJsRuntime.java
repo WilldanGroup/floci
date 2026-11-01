@@ -336,8 +336,10 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
                         : objectMapper.createObjectNode(),
                 Map.class);
         if (response.path("ok").asBoolean(false)) {
+            JsonNode skipTo = response.path("skipTo");
             return new JsEvaluation(unwrap(response.get("result")), stash,
-                    response.path("earlyReturn").asBoolean(false), appended, null, false);
+                    response.path("earlyReturn").asBoolean(false), appended, null, false,
+                    skipTo.isTextual() ? skipTo.asText() : null);
         }
         return new JsEvaluation(null, stash, false, appended, toError(response.path("error")),
                 response.path("missingHandler").asBoolean(false));

@@ -9,21 +9,29 @@ import java.util.Map;
  * @param result       what the handler returned: a data source request for {@code request()}, the
  *                     field's value for {@code response()}
  * @param stash        {@code ctx.stash} as the handler left it, carried to the next pipeline stage
- * @param earlyReturn  the handler called {@code runtime.earlyReturn()}, so the pipeline stops here
- *                     and {@code result} is the field's value
+ * @param earlyReturn  the handler called {@code runtime.earlyReturn()}, so the rest of its stage is
+ *                     skipped and {@code result} is that stage's result
  * @param appendedErrors errors collected by {@code util.appendError}, which do not stop execution
  *                     but are reported alongside the data
  * @param error        the handler threw; null on success. A {@code util.error()} call arrives with
  *                     the type and data the resolver chose
  * @param missingHandler the module exports no such function, which the caller reads as "pass the
  *                     value through" rather than as a failure
+ * @param skipTo       the {@code skipTo} an early return named, {@code END} or {@code NEXT}, or null
+ *                     where it named none
  */
 public record JsEvaluation(Object result,
                            Map<String, Object> stash,
                            boolean earlyReturn,
                            List<JsError> appendedErrors,
                            JsError error,
-                           boolean missingHandler) {
+                           boolean missingHandler,
+                           String skipTo) {
+
+    public JsEvaluation(Object result, Map<String, Object> stash, boolean earlyReturn,
+                        List<JsError> appendedErrors, JsError error, boolean missingHandler) {
+        this(result, stash, earlyReturn, appendedErrors, error, missingHandler, null);
+    }
 
     public boolean failed() {
         return error != null;
