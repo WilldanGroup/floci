@@ -1568,7 +1568,13 @@ public class ResourceArnBuilder {
             if (json.hasNonNull("TableName")) {
                 String tableName = json.get("TableName").asText().trim();
                 if (!tableName.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
+                    String tableArn = toDynamoDbTableArn(tableName, region, accountId);
+                    // A request naming an index, a Query or Scan of it or its contributor insights, acts on the
+                    // index, so AWS authorizes it against the index's ARN, table/<table>/index/<index>, and a
+                    // grant on the table alone does not reach it (Service Authorization Reference, Actions,
+                    // resources, and condition keys for Amazon DynamoDB: the index resource type).
+                    String indexName = json.hasNonNull("IndexName") ? json.get("IndexName").asText().trim() : "";
+                    return List.of(indexName.isEmpty() ? tableArn : tableArn + "/index/" + indexName);
                 }
             }
             if (json.path("TableCreationParameters").hasNonNull("TableName")) {
