@@ -14,10 +14,15 @@ import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,13 +43,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** The AppSync CFN provisioner in isolation, with only AppSyncService mocked. */
+/** The AppSync CFN provisioner in isolation, with AppSyncService and S3Service mocked. */
 class AppSyncCfnProvisionerTest {
 
     private static final String API_ID = "abcd1234";
 
     private final AppSyncService appSync = mock(AppSyncService.class);
-    private final AppSyncCfnProvisioner provisioner = new AppSyncCfnProvisioner(appSync);
+    private final S3Service s3 = mock(S3Service.class);
+    private final AppSyncCfnProvisioner provisioner = new AppSyncCfnProvisioner(appSync, s3);
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
@@ -88,6 +94,12 @@ class AppSyncCfnProvisionerTest {
         SchemaCreationStatus success = new SchemaCreationStatus();
         success.setStatus(SchemaCreationStatusType.SUCCESS);
         when(appSync.getSchemaCreationStatus(API_ID)).thenReturn(success);
+    }
+
+    /** An object the S3 mock holds at {@code bucket}/{@code key}, latest version. */
+    private void s3Holds(String bucket, String key, String text) {
+        when(s3.getObject(bucket, key, null)).thenReturn(new S3Object(bucket, key,
+                text.getBytes(StandardCharsets.UTF_8), "application/octet-stream"));
     }
 
     /** The request the provisioner handed CreateGraphqlApi. */
@@ -280,15 +292,70 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
-    void schemaFromS3IsRefusedRatherThanSilentlyEmpty() {
+    void schemaIsCreatedFromTheObjectItsDefinitionS3LocationNames() {
+        schemaCompletesImmediately();
+        s3Holds("b", "api/1/schema.graphql", "type Query { ping: String }");
+        StackResource r = resource("AWS::AppSync::GraphQLSchema", "GraphQlSchema");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("DefinitionS3Location", "s3://b/api/1/schema.graphql");
+
+        provisioner.provision(r, props, ctx());
+
+        // The bucket runs to the first slash and the key is all of the rest, slashes included.
+        verify(appSync).startSchemaCreation(API_ID, "type Query { ping: String }");
+        assertEquals(API_ID + "GraphQLSchema", r.getPhysicalId());
+    }
+
+    @Test
+    void anInlineSchemaReadsNoObject() {
+        schemaCompletesImmediately();
+        StackResource r = resource("AWS::AppSync::GraphQLSchema", "GraphQlSchema");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("Definition", "type Query { ping: String }");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(appSync).startSchemaCreation(API_ID, "type Query { ping: String }");
+        verifyNoInteractions(s3);
+    }
+
+    @Test
+    void aSchemaWhoseObjectIsMissingFailsInS3sWords() {
+        when(s3.getObject("b", "api/1/missing.graphql", null))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        StackResource r = resource("AWS::AppSync::GraphQLSchema", "GraphQlSchema");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("DefinitionS3Location", "s3://b/api/1/missing.graphql");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("AWS::AppSync::GraphQLSchema"), e.getMessage());
+        assertTrue(e.getMessage().contains("DefinitionS3Location"), e.getMessage());
+        assertTrue(e.getMessage().contains("s3://b/api/1/missing.graphql"), e.getMessage());
+        assertTrue(e.getMessage().contains("NoSuchKey"), e.getMessage());
+        assertTrue(e.getMessage().contains("The specified key does not exist."), e.getMessage());
+        // An empty schema in its place would compile and fail every resolver behind it instead.
+        verify(appSync, never()).startSchemaCreation(anyString(), anyString());
+    }
+
+    @Test
+    void aSchemaLocationGivenAsAnObjectIsRefusedNamingTheForm() {
         StackResource r = resource("AWS::AppSync::GraphQLSchema", "GraphQlSchema");
         ObjectNode props = mapper.createObjectNode().put("ApiId", API_ID);
+        // Step Functions' form of the same property; AppSync's reference types it as a String.
         props.putObject("DefinitionS3Location").put("Bucket", "b").put("Key", "schema.graphql");
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
 
+        assertEquals("ValidationError", e.getErrorCode());
         assertTrue(e.getMessage().contains("DefinitionS3Location"), e.getMessage());
+        assertTrue(e.getMessage().contains("s3://<bucket>/<key>"), e.getMessage());
         verify(appSync, never()).startSchemaCreation(anyString(), anyString());
+        verifyNoInteractions(s3);
     }
 
     @Test
@@ -455,6 +522,31 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
+    void functionCodeIsTheObjectItsCodeS3LocationNames() {
+        FunctionConfiguration fn = new FunctionConfiguration();
+        fn.setFunctionId("fn123");
+        fn.setName("Query_getMessages_0");
+        fn.setFunctionArn("arn:fn");
+        when(appSync.createFunction(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(fn);
+        s3Holds("b", "api/1/functions/getMessages.js", "export function request(ctx) { return {}; }\n");
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFnGetMessages");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("Name", "Query_getMessages_0")
+                .put("CodeS3Location", "s3://b/api/1/functions/getMessages.js");
+        props.putObject("Runtime").put("Name", "APPSYNC_JS").put("RuntimeVersion", "1.0.0");
+
+        provisioner.provision(r, props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createFunction(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        assertEquals("export function request(ctx) { return {}; }\n", captor.getValue().get("code"));
+        // The location is the template's, not a member CreateFunction takes.
+        assertFalse(captor.getValue().containsKey("codeS3Location"));
+    }
+
+    @Test
     void functionUpdateAddressesTheRecordedFunctionId() {
         FunctionConfiguration fn = new FunctionConfiguration();
         fn.setFunctionId("fn123");
@@ -563,7 +655,58 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
-    void resolverCodeFromS3IsRefused() {
+    void resolverCodeIsTheObjectItsCodeS3LocationNames() {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.createResolver(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(resolver);
+        s3Holds("bucket", "api/1/resolvers/Query.getMessages.js",
+                "export function response(ctx) { return ctx.prev.result; }\n");
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("TypeName", "Query")
+                .put("FieldName", "getMessages")
+                .put("Kind", "PIPELINE")
+                .put("CodeS3Location", "s3://bucket/api/1/resolvers/Query.getMessages.js");
+        props.putObject("Runtime").put("Name", "APPSYNC_JS").put("RuntimeVersion", "1.0.0");
+        props.putObject("PipelineConfig").putArray("Functions").add("fn123");
+
+        provisioner.provision(r, props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createResolver(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        assertEquals("export function response(ctx) { return ctx.prev.result; }\n",
+                captor.getValue().get("code"));
+        assertFalse(captor.getValue().containsKey("codeS3Location"));
+    }
+
+    @Test
+    void inlineResolverCodeReadsNoObject() {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.createResolver(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(resolver);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("TypeName", "Query")
+                .put("FieldName", "getMessages")
+                .put("Kind", "PIPELINE")
+                .put("Code", "export function response(ctx) { return ctx.prev.result; }");
+
+        provisioner.provision(r, props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createResolver(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        assertEquals("export function response(ctx) { return ctx.prev.result; }", captor.getValue().get("code"));
+        verifyNoInteractions(s3);
+    }
+
+    @Test
+    void aResolverWhoseObjectIsMissingFailsInS3sWords() {
+        when(s3.getObject("bucket", "resolver.js", null))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
         StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
         ObjectNode props = mapper.createObjectNode()
                 .put("ApiId", API_ID)
@@ -573,7 +716,50 @@ class AppSyncCfnProvisionerTest {
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
 
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("AWS::AppSync::Resolver"), e.getMessage());
         assertTrue(e.getMessage().contains("CodeS3Location"), e.getMessage());
+        assertTrue(e.getMessage().contains("s3://bucket/resolver.js"), e.getMessage());
+        assertTrue(e.getMessage().contains("NoSuchKey"), e.getMessage());
+        verify(appSync, never()).createResolver(anyString(), any(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"resolver.js", "s3://bucket", "s3://bucket/", "s3:///resolver.js"})
+    void aResolverCodeLocationThatIsNoS3AddressIsRefusedNamingTheForm(String location) {
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("TypeName", "Query")
+                .put("FieldName", "getMessages")
+                .put("CodeS3Location", location);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("AWS::AppSync::Resolver"), e.getMessage());
+        assertTrue(e.getMessage().contains("CodeS3Location " + location + " "), e.getMessage());
+        assertTrue(e.getMessage().contains("s3://<bucket>/<key>"), e.getMessage());
+        verify(appSync, never()).createResolver(anyString(), any(), anyString());
+        verifyNoInteractions(s3);
+    }
+
+    @Test
+    void aFunctionCodeLocationGivenAsAnObjectIsRefusedNamingTheForm() {
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFn");
+        ObjectNode props = mapper.createObjectNode()
+                .put("ApiId", API_ID)
+                .put("Name", "fn");
+        props.putObject("CodeS3Location").put("Bucket", "b").put("Key", "fn.js");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("AWS::AppSync::FunctionConfiguration"), e.getMessage());
+        assertTrue(e.getMessage().contains("CodeS3Location"), e.getMessage());
+        assertTrue(e.getMessage().contains("s3://<bucket>/<key>"), e.getMessage());
+        verify(appSync, never()).createFunction(anyString(), any(), anyString());
+        verifyNoInteractions(s3);
     }
 
     // ── ApiKey ───────────────────────────────────────────────────────────────

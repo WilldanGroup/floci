@@ -426,7 +426,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new AcmCfnProvisioner(acmService));
             }
             if (appSyncService != null) {
-                discovered.add(new AppSyncCfnProvisioner(appSyncService));
+                discovered.add(new AppSyncCfnProvisioner(appSyncService, s3Service));
             }
             if (appConfigService != null) {
                 discovered.add(new AppConfigCfnProvisioner(appConfigService));
