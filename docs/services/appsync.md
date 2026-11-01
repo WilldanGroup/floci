@@ -158,14 +158,16 @@ already-running instance instead (Docker Compose setups) and is checked the same
 
 The sidecar itself carries no AppSync-specific knowledge: no `@aws_auth`, no IAM, no directive
 semantics, and no AWS scalar vocabulary either. `StartSchemaCreation` sends the SDL (with
-AppSync's directive declarations and the 17 custom scalar types injected, customers never declare
-those themselves) plus a `scalars` mapping (each AppSync scalar name onto one of the sidecar's
+AppSync's directive declarations injected, and each of the 17 custom scalar types the schema does
+not declare itself) plus a `scalars` mapping (each AppSync scalar name onto one of the sidecar's
 generic coercion kinds, e.g. `AWSDateTime` onto `date-time`) to the sidecar's
-`/v1/schema/validate`, which parses and compiles it generically. Invalid schemas are rejected
-asynchronously (status `FAILED` with details after `PROCESSING`), using the sidecar's structured,
-per-problem errors to build the same `codeErrors` shape this API always returned. Valid schemas
-are registered in Floci's own `SchemaRegistry` (now just a raw-SDL cache; nothing is compiled
-in-process) and persisted to the schema store.
+`/v1/schema/validate`, which parses and compiles it generically. A schema may declare any of those
+scalars, as AppSync's takes `scalar AWSDateTime`: the declaration means the built-in, its values
+checked and converted as an undeclared one's, and a `scalar` written in a description or a comment
+declares nothing. Invalid schemas are rejected asynchronously (status `FAILED` with details after
+`PROCESSING`), using the sidecar's structured, per-problem errors to build the same `codeErrors`
+shape this API always returned. Valid schemas are registered in Floci's own `SchemaRegistry` (now
+just a raw-SDL cache; nothing is compiled in-process) and persisted to the schema store.
 
 At execution time, Floci calls the sidecar's `/v1/plan` to learn which `(type, field)` coordinates
 a query will visit and what directives are on each, computes `@aws_auth`/IAM/Cognito/Lambda
