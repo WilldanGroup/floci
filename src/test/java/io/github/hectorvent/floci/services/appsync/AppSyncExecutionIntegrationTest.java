@@ -361,6 +361,52 @@ class AppSyncExecutionIntegrationTest {
     }
 
     @Test
+    void declaredAwsDateTimeIsCoercedAsTheBuiltIn() {
+        // A schema may declare AppSync's scalars itself, as AppSync's takes them; the declaration
+        // names the built-in, so its values are checked exactly as an undeclared AWSDateTime's.
+        String scalarApi = createApi("scalar-decl-" + UUID.randomUUID().toString().substring(0, 8));
+        String scalarKey = createApiKey(scalarApi);
+        startSchema(scalarApi, """
+                \"""An ISO 8601 date and time.\"""
+                scalar AWSDateTime
+
+                type Query { echo(t: AWSDateTime): AWSDateTime }
+                """);
+        awaitSchemaSuccess(scalarApi);
+
+        given()
+            .header("x-api-key", scalarKey)
+            .contentType("application/json")
+            .body("""
+                {
+                  "query": "query($t: AWSDateTime) { echo(t: $t) }",
+                  "variables": {"t": "not-a-date"}
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + scalarApi + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("ValidationError"))
+            .body("errors[0].message", containsString("Invalid AWSDateTime"));
+
+        given()
+            .header("x-api-key", scalarKey)
+            .contentType("application/json")
+            .body("""
+                {
+                  "query": "query($t: AWSDateTime) { echo(t: $t) }",
+                  "variables": {"t": "2026-01-01T00:00:00Z"}
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + scalarApi + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("errors", nullValue());
+    }
+
+    @Test
     void fragmentCycleAgainstProtectedFieldNeverLeaksRealData() {
         // Proves the sidecar's fail-closed /v1/plan behavior: a query the planner can't
         // analyze must never fall back to "nothing to authorize, run it anyway."

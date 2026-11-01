@@ -8,9 +8,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,9 +20,11 @@ import java.util.regex.Pattern;
  * Prepares a customer's SDL for the (AWS-agnostic) GraphQL sidecar and validates it against it
  * (issue #2917): what {@code AppSyncSchemaParser} used to do in-process. AppSync provides its
  * directive declarations ({@code @aws_auth} etc.) and the 17 custom scalar type declarations
- * implicitly: customers never write {@code scalar AWSDateTime} themselves. That injection is
- * pure AWS-specific knowledge (which directives exist, their exact argument shapes) with no
- * business living in the sidecar, so it happens here, before the SDL is ever sent anywhere.
+ * implicitly, and a schema may also declare any of those scalars itself ({@code scalar
+ * AWSDateTime}), as AppSync's takes it: such a declaration names the built-in, so it is injected
+ * only where the schema does not declare it. That injection is pure AWS-specific knowledge (which
+ * directives exist, their exact argument shapes) with no business living in the sidecar, so it
+ * happens here, before the SDL is ever sent anywhere.
  */
 @ApplicationScoped
 public class SidecarSchemaCompiler {
@@ -59,6 +63,9 @@ public class SidecarSchemaCompiler {
 
     private static final Pattern DIRECTIVE_USE = Pattern.compile("@(\\w+)");
 
+    /** A scalar type definition, or (group 1 set) an extension of a scalar defined elsewhere. */
+    private static final Pattern SCALAR_DEFINITION = Pattern.compile("\\b(extend\\s+)?scalar\\s+(\\w+)");
+
     private final GraphqlSidecarClient sidecarClient;
 
     @Inject
@@ -81,25 +88,49 @@ public class SidecarSchemaCompiler {
         return SCALAR_KIND_MAPPING;
     }
 
-    /** The SDL to actually send the sidecar for plan/execute: same injection as at validation time. */
+    /**
+     * The SDL to actually send the sidecar for plan/execute: same injection as at validation time.
+     * A scalar of AppSync's the SDL declares itself is not injected again, so the sidecar sees one
+     * definition of it; its name stays in {@link #scalarKindMapping()}, so its values are coerced
+     * as the built-in's whatever the declaration's description or directives.
+     */
     public String withDirectivesAndScalars(String sdl) {
+        Set<String> declared = declaredScalars(sdl);
         StringBuilder sb = new StringBuilder();
         for (AppSyncDirective directive : AppSyncDirective.values()) {
             sb.append(directive.sdl()).append('\n');
         }
         sb.append('\n');
         for (String scalarName : SCALAR_NAMES) {
-            sb.append("scalar ").append(scalarName).append('\n');
+            if (!declared.contains(scalarName)) {
+                sb.append("scalar ").append(scalarName).append('\n');
+            }
         }
         sb.append('\n').append(sdl);
         return sb.toString();
     }
 
-    private void validateNoUnknownDirectives(String sdl) {
-        String clean = sdl
+    /** The scalars {@code sdl} defines; a {@code scalar} in a description, string or comment is none. */
+    private static Set<String> declaredScalars(String sdl) {
+        Set<String> declared = new HashSet<>();
+        Matcher matcher = SCALAR_DEFINITION.matcher(withoutDescriptionsStringsAndComments(sdl));
+        while (matcher.find()) {
+            if (matcher.group(1) == null) {
+                declared.add(matcher.group(2));
+            }
+        }
+        return declared;
+    }
+
+    private static String withoutDescriptionsStringsAndComments(String sdl) {
+        return sdl
                 .replaceAll("\"\"\"[\\s\\S]*?\"\"\"", "")
                 .replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "")
                 .replaceAll("#[^\n]*", "");
+    }
+
+    private void validateNoUnknownDirectives(String sdl) {
+        String clean = withoutDescriptionsStringsAndComments(sdl);
         Matcher matcher = DIRECTIVE_USE.matcher(clean);
         while (matcher.find()) {
             String name = matcher.group(1);

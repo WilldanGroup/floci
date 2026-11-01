@@ -2765,6 +2765,50 @@ class AppSyncIntegrationTest {
     }
 
     @Test
+    @Order(608)
+    void schemaRegistry_parseDeclaringAWSScalars() throws JsonProcessingException {
+        // AppSync takes a schema that declares its own scalars (GraphQL tooling that builds the
+        // schema outside AppSync needs the declarations); Floci injects only those not declared.
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "scalar-decl-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String definition = """
+                \"""An ISO 8601 date and time.\"""
+                scalar AWSDateTime
+                \"""A JSON document.\"""
+                scalar AWSJSON
+                \"""An absolute URL.\"""
+                scalar AWSURL
+                \"""An email address.\"""
+                scalar AWSEmail
+
+                type Query { now: AWSDateTime, data: AWSJSON, site: AWSURL, contact: AWSEmail }
+                """;
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body(new ObjectMapper().writeValueAsString(Map.of("definition", definition)))
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("PROCESSING"));
+        Map<String, Object> terminal = awaitSchemaTerminal(tempApiId);
+        assertThat(String.valueOf(terminal.get("details")), terminal.get("status"), equalTo("SUCCESS"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
     @Order(603)
     void schemaRegistry_schemaExtension() {
         String tempApiId = given()
