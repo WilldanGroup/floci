@@ -865,6 +865,28 @@ class ResourceArnBuilderTest {
                 builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
     }
 
+    /** A Query or Scan of an index acts on the index, so it is checked on the index's ARN, as AWS checks it. */
+    @Test
+    void dynamoDbBuildsTheIndexArnForARequestNamingAnIndex() {
+        setJsonBody("{\"TableName\":\"FgacTable\",\"IndexName\":\"GSI1\"}");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable/index/GSI1",
+                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void dynamoDbBuildsTheIndexArnUnderATableNamedByItsArn() {
+        String tableArn = "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/FgacTable";
+        setJsonBody("{\"TableName\":\"" + tableArn + "\",\"IndexName\":\"GSI1\"}");
+        assertEquals(tableArn + "/index/GSI1", builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void dynamoDbBuildsTheTableArnWhereTheIndexNameIsEmpty() {
+        setJsonBody("{\"TableName\":\"FgacTable\",\"IndexName\":\" \"}");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable",
+                builder.build("dynamodb", ctx, "us-east-1", "000000000000"));
+    }
+
     @Test
     void dynamoDbReturnsExactArnIfTableNameIsAlreadyArn() {
         String fullArn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
