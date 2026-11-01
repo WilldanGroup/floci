@@ -2240,6 +2240,15 @@ as the GetClusterCredentials API reference lists them. They are checked before t
 so a denied request gets `AccessDenied` even for a cluster that does not exist. The `dbname` resource
 that `DbName` needs is not checked.
 
+**A DynamoDB index is named.** A Query or Scan that names an `IndexName`, and the contributor
+insights actions that name one, act on the index, so they are evaluated against the index's ARN,
+`arn:aws:dynamodb:<region>:<account>:table/<table>/index/<index>`, as the Service Authorization
+Reference gives those actions the `index` resource type. A statement allowing
+`table/Orders/index/ByCustomer` alone lets a caller query that index and not the table, and one
+allowing `table/Orders` alone does not reach its indexes; `table/Orders/index/*` reaches every index
+of the table. A request that names no index is evaluated against the table. PartiQL statements that
+read an index are evaluated against its table.
+
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
