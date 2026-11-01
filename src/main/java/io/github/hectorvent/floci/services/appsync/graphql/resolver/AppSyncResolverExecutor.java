@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlContext;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlResult;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceException;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
 import io.github.hectorvent.floci.services.appsync.graphql.js.JsEvaluation;
@@ -351,7 +352,8 @@ public class AppSyncResolverExecutor {
                 // emulator, and routing it somewhere a resolver can swallow it would hide it.
                 LOG.debugv("Data source {0} failed for {1}.{2}: {3}", dataSource.getName(),
                         resolver.getTypeName(), resolver.getFieldName(), e.getMessage());
-                return new Invocation(null,
+                Object result = e instanceof AppSyncDataSourceException withResult ? withResult.result() : null;
+                return new Invocation(result,
                         new JsEvaluation.JsError(e.getMessage(), e.getErrorCode(), null, null));
             }
         }
@@ -469,7 +471,8 @@ public class AppSyncResolverExecutor {
 
         /**
          * One data source call's outcome: its result, or the error {@code ctx.error} carries into the
-         * response handler. Never both.
+         * response handler, and both only where AppSync keeps a result beside the error, as it keeps
+         * a cancelled transaction's {@code cancellationReasons}.
          */
         private record Invocation(Object result, JsEvaluation.JsError error) {}
 

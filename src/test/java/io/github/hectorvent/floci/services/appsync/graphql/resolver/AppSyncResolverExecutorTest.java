@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceAuthorizer;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceException;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.LambdaDataSourceInvoker;
@@ -445,6 +446,29 @@ class AppSyncResolverExecutorTest {
                 jsRuntime.calls);
         assertEquals(1, result.errors().size());
         assertEquals("query failed", result.errors().get(0).message());
+    }
+
+    @Test
+    void aCancelledTransactionReachesTheResponseHandlerWithItsResultBesideTheError() {
+        when(appSync.getDataSource(API_ID, "table")).thenReturn(
+                dataSource("table", DataSourceType.AMAZON_DYNAMODB));
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("table");
+        Map<String, Object> cancellation = new LinkedHashMap<>();
+        cancellation.put("keys", null);
+        cancellation.put("cancellationReasons", List.of(
+                Map.of("type", "ConditionalCheckFailed", "message", "The conditional request failed")));
+        dynamoDbInvoker.failure = new AppSyncDataSourceException("DynamoDB:TransactionCanceledException",
+                "Transaction cancelled", 400, cancellation);
+        jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of("operation", "TransactWriteItems")));
+        jsRuntime.script("unit-code", "response", (h, ctx) -> ok("lost"));
+
+        executor.execute(resolver, invocation(Map.of()));
+
+        // AppSync's TransactWriteItems reference: ctx.error, and ctx.result.cancellationReasons beside it.
+        Map<?, ?> ctxError = (Map<?, ?>) jsRuntime.contexts.get(1).get("error");
+        assertEquals("DynamoDB:TransactionCanceledException", ctxError.get("type"));
+        assertEquals(cancellation, jsRuntime.contexts.get(1).get("result"));
     }
 
     @Test
