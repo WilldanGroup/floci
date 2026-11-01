@@ -38,7 +38,7 @@ const UTILS_DIR = path.join(ROOT, 'node_modules', '@aws-appsync', 'utils');
 // - in code *or in a comment* - ends the string and the sidecar fails to boot with a SyntaxError.
 // Escape them (\` and \${) or write around them.
 const UTILS_INDEX = `
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 const ERROR_MARKER = Symbol.for('floci.appsync.error');
 const RETURN_MARKER = Symbol.for('floci.appsync.earlyReturn');
 
@@ -97,6 +97,26 @@ const fromDynamoDB = (value) => {
   return null;
 };
 
+// A ULID: a 48-bit millisecond timestamp in ten characters, then 80 random bits in sixteen, in
+// Crockford's base32, 26 characters that sort by the time they were made.
+const ULID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const autoUlid = () => {
+  let time = Date.now();
+  let stamp = '';
+  for (let i = 0; i < 10; i++) {
+    stamp = ULID_ALPHABET[time % 32] + stamp;
+    time = Math.floor(time / 32);
+  }
+  let bits = 0n;
+  for (const byte of randomBytes(10)) bits = (bits << 8n) | BigInt(byte);
+  let random = '';
+  for (let i = 0; i < 16; i++) {
+    random = ULID_ALPHABET[Number(bits & 31n)] + random;
+    bits >>= 5n;
+  }
+  return stamp + random;
+};
+
 const unsupported = (name) => () => {
   throw new TemplateError(\`util.\${name} is not implemented by Floci's AppSync JS runtime\`,
     'FlociUnsupported');
@@ -111,7 +131,7 @@ export const util = {
   },
   unauthorized() { throw new TemplateError('Unauthorized', 'Unauthorized'); },
   autoId() { return randomUUID(); },
-  autoUlid: unsupported('autoUlid'),
+  autoUlid() { return autoUlid(); },
   autoKsuid: unsupported('autoKsuid'),
   matches(pattern, value) { return new RegExp(pattern).test(String(value)); },
   authType() { return globalThis.__floci_authType ?? null; },

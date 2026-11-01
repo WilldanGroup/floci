@@ -20,6 +20,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Executes real {@code APPSYNC_JS} resolvers end to end: a GraphQL query over HTTP, out to the
@@ -54,6 +57,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               loops: String
               keywordsInText: String
               earlyReturns(skipTo: String): String
+              ulids: String
             }
             """;
 
@@ -205,6 +209,17 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    /** Two ULIDs made one after the other, as a write that keys its row by one does. */
+    private static final String ULID_RESOLVER = """
+            import { util } from "@aws-appsync/utils";
+            export function request(ctx) {
+              return { payload: util.autoUlid() + " " + util.autoUlid() };
+            }
+            export function response(ctx) {
+              return ctx.result;
+            }
+            """;
+
     private String apiId;
     private String apiKey;
 
@@ -232,6 +247,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "ulids", "local", ULID_RESOLVER);
         createPipelineResolver(apiId, "Query", "earlyReturns", EARLY_RETURN_RESOLVER,
                 createFunction(apiId, "Query_earlyReturns_0", "local", EARLY_RETURN_FUNCTION),
                 createFunction(apiId, "Query_earlyReturns_1", "local", APPENDING_FUNCTION));
@@ -409,6 +425,29 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void utilAutoUlidAnswersAUlidOfTheTimeItWasMade() {
+        long before = System.currentTimeMillis();
+        String[] ulids = query("{ ulids }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .extract().<String>path("data.ulids").split(" ");
+        long after = System.currentTimeMillis();
+
+        // AppSync's util reference: "a 128-bit randomly generated ULID", 26 characters of
+        // Crockford's base32 whose first ten are the millisecond it was made.
+        assertEquals(2, ulids.length);
+        for (String ulid : ulids) {
+            assertTrue(ulid.matches("[0-7][0-9A-HJKMNP-TV-Z]{25}"), ulid);
+            long time = 0;
+            for (char c : ulid.substring(0, 10).toCharArray()) {
+                time = time * 32 + "0123456789ABCDEFGHJKMNPQRSTVWXYZ".indexOf(c);
+            }
+            assertTrue(time >= before - 1000 && time <= after + 1000, ulid + " at " + time);
+        }
+        assertNotEquals(ulids[0], ulids[1]);
     }
 
     @Test
