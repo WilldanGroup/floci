@@ -235,7 +235,72 @@ class AppSyncDataSourceAuthorizerTest {
     void unsupportedOperationCannotSkipPolicyEvaluation() {
         DataSource source = dataSource(DataSourceType.AMAZON_DYNAMODB);
         role(TRUST, allow("dynamodb:GetItem", "*"));
-        denied(authorizer, source, Map.of("operation", "BatchGetItem"));
+        denied(authorizer, source, Map.of("operation", "Sync"));
+    }
+
+    @Test
+    void aBatchNeedsItsBatchActionOnEveryTableItNames() throws Exception {
+        DataSource source = dataSource(DataSourceType.AMAZON_DYNAMODB);
+        Object read = mapper.readTree("""
+                {"operation":"BatchGetItem","tables":{
+                  "Products":{"keys":[{"id":{"S":"1"}}]},"Orders":{"keys":[{"id":{"S":"2"}}]}}}
+                """);
+        role(TRUST, """
+                {"Statement":{"Effect":"Allow","Action":"dynamodb:BatchGetItem","Resource":[
+                  "arn:aws:dynamodb:us-east-1:000000000000:table/Products",
+                  "arn:aws:dynamodb:us-east-1:000000000000:table/Orders"]}}
+                """);
+        authorizer.authorize(source, read, "us-east-1");
+        // The data source's own table is not enough: the batch names Orders too.
+        role(TRUST, allow("dynamodb:BatchGetItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/Products"));
+        denied(authorizer, source, read);
+        // A batch read is BatchGetItem, never GetItem.
+        role(TRUST, allow("dynamodb:GetItem", "*"));
+        denied(authorizer, source, read);
+
+        Object write = mapper.readTree("""
+                {"operation":"BatchDeleteItem","tables":{"Orders":[{"id":{"S":"2"}}]}}
+                """);
+        role(TRUST, allow("dynamodb:BatchWriteItem",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/Orders"));
+        authorizer.authorize(source, write, "us-east-1");
+        authorizer.authorize(source, mapper.readTree("""
+                {"operation":"BatchPutItem","tables":{"Orders":[{"id":{"S":"2"}}]}}
+                """), "us-east-1");
+        role(TRUST, allow("dynamodb:DeleteItem", "*"));
+        denied(authorizer, source, write);
+    }
+
+    @Test
+    void aTransactionIsCheckedItemByItemOnEachItemsTable() throws Exception {
+        DataSource source = dataSource(DataSourceType.AMAZON_DYNAMODB);
+        Object write = mapper.readTree("""
+                {"operation":"TransactWriteItems","transactItems":[
+                  {"table":"Products","operation":"PutItem","key":{"id":{"S":"1"}}},
+                  {"table":"Orders","operation":"ConditionCheck","key":{"id":{"S":"2"}},
+                   "condition":{"expression":"attribute_exists(id)"}}]}
+                """);
+        role(TRUST, """
+                {"Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:PutItem",
+                   "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/Products"},
+                  {"Effect":"Allow","Action":"dynamodb:ConditionCheckItem",
+                   "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/Orders"}]}
+                """);
+        authorizer.authorize(source, write, "us-east-1");
+        // The condition check's table needs its own action: a put on Products does not cover it.
+        role(TRUST, allow("dynamodb:PutItem", "arn:aws:dynamodb:us-east-1:000000000000:table/*"));
+        denied(authorizer, source, write);
+
+        Object read = mapper.readTree("""
+                {"operation":"TransactGetItems","transactItems":[
+                  {"table":"Orders","key":{"id":{"S":"2"}}}]}
+                """);
+        role(TRUST, allow("dynamodb:GetItem", "arn:aws:dynamodb:us-east-1:000000000000:table/Orders"));
+        authorizer.authorize(source, read, "us-east-1");
+        role(TRUST, allow("dynamodb:GetItem", "arn:aws:dynamodb:us-east-1:000000000000:table/Products"));
+        denied(authorizer, source, read);
     }
 
     @Test

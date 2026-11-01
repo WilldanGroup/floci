@@ -19,9 +19,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /** Checks the data source role before a resolver accesses a backing AWS resource. */
 @ApplicationScoped
@@ -126,12 +128,37 @@ public class AppSyncDataSourceAuthorizer {
         };
     }
 
+    /**
+     * The actions DynamoDB checks for the request, each on its table's ARN. A batch or a transaction
+     * names its own tables, and is checked as DynamoDB checks the call AppSync makes of it: a batch
+     * read as {@code dynamodb:BatchGetItem} and a batch write as {@code dynamodb:BatchWriteItem} on
+     * each table it names, and a transaction item by item, a get as {@code dynamodb:GetItem} and a
+     * condition check as {@code dynamodb:ConditionCheckItem} (Service Authorization Reference,
+     * Amazon DynamoDB; DynamoDB Developer Guide, Using IAM with DynamoDB transactions).
+     */
     private List<Permission> dynamoDbPermissions(DataSource dataSource, Object request, String region,
                                                   AwsArnUtils.Arn roleId) {
-        String table = text(dataSource.getDynamodbConfig(), "tableName");
         JsonNode normalized = objectMapper.valueToTree(request == null ? Map.of() : request);
         String operation = normalized.path("operation").asText(null);
-        if (table == null || operation == null) {
+        if (operation == null) {
+            return List.of();
+        }
+        switch (operation) {
+            case "BatchGetItem" -> {
+                return tablePermissions("dynamodb:BatchGetItem", normalized.path("tables"), region, roleId);
+            }
+            case "BatchPutItem", "BatchDeleteItem" -> {
+                return tablePermissions("dynamodb:BatchWriteItem", normalized.path("tables"), region, roleId);
+            }
+            case "TransactGetItems", "TransactWriteItems" -> {
+                return transactionPermissions(normalized.path("transactItems"), region, roleId);
+            }
+            default -> {
+                // A single-item operation, on the data source's own table.
+            }
+        }
+        String table = text(dataSource.getDynamodbConfig(), "tableName");
+        if (table == null) {
             return List.of();
         }
         String action = switch (operation) {
@@ -139,14 +166,48 @@ public class AppSyncDataSourceAuthorizer {
                     "dynamodb:" + operation;
             default -> throw denied(dataSource, "DynamoDB operation is not supported for role authorization");
         };
-        String resource = new AwsArnUtils.Arn(roleId.partition(), "dynamodb", region,
-                roleId.accountId(), "table/" + table).toString();
+        String resource = tableArn(table, region, roleId);
         String index = normalized.path("index").asText(null);
         if (index != null && !index.isBlank()
                 && ("dynamodb:Query".equals(action) || "dynamodb:Scan".equals(action))) {
             resource += "/index/" + index;
         }
         return List.of(new Permission(action, resource));
+    }
+
+    private List<Permission> tablePermissions(String action, JsonNode tables, String region,
+                                              AwsArnUtils.Arn roleId) {
+        List<Permission> permissions = new ArrayList<>();
+        tables.fieldNames().forEachRemaining(table ->
+                permissions.add(new Permission(action, tableArn(table, region, roleId))));
+        return permissions;
+    }
+
+    private List<Permission> transactionPermissions(JsonNode transactItems, String region,
+                                                    AwsArnUtils.Arn roleId) {
+        Set<Permission> permissions = new LinkedHashSet<>();
+        for (JsonNode item : transactItems) {
+            String table = item.path("table").asText("");
+            // A transaction's read names no operation; a write item's that is none of these four
+            // is the invoker's to refuse.
+            String action = switch (item.path("operation").asText("GetItem")) {
+                case "GetItem" -> "dynamodb:GetItem";
+                case "PutItem" -> "dynamodb:PutItem";
+                case "UpdateItem" -> "dynamodb:UpdateItem";
+                case "DeleteItem" -> "dynamodb:DeleteItem";
+                case "ConditionCheck" -> "dynamodb:ConditionCheckItem";
+                default -> null;
+            };
+            if (!table.isBlank() && action != null) {
+                permissions.add(new Permission(action, tableArn(table, region, roleId)));
+            }
+        }
+        return new ArrayList<>(permissions);
+    }
+
+    private static String tableArn(String table, String region, AwsArnUtils.Arn roleId) {
+        return new AwsArnUtils.Arn(roleId.partition(), "dynamodb", region,
+                roleId.accountId(), "table/" + table).toString();
     }
 
     private List<Permission> lambdaPermissions(DataSource dataSource) {
