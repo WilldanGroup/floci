@@ -53,6 +53,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               importsNode: String
               loops: String
               keywordsInText: String
+              earlyReturns(skipTo: String): String
             }
             """;
 
@@ -77,6 +78,40 @@ class AppSyncJsResolverDockerIntegrationTest {
                 { id: "1", name: "Acme " + ctx.stash.orgNo },
                 { id: "2", name: "Globex" }
               ] };
+            }
+            export function response(ctx) {
+              return ctx.result;
+            }
+            """;
+
+    /** Each step appends its name to what the one before it returned. */
+    private static final String EARLY_RETURN_RESOLVER = """
+            export function request(ctx) {
+              return "before";
+            }
+            export function response(ctx) {
+              return ctx.prev.result + ">after";
+            }
+            """;
+
+    /** Returns early from its request handler, with the skipTo the query names, if any. */
+    private static final String EARLY_RETURN_FUNCTION = """
+            import { runtime } from "@aws-appsync/utils";
+            export function request(ctx) {
+              const value = ctx.prev.result + ">first";
+              if (ctx.args.skipTo) {
+                runtime.earlyReturn(value, { skipTo: ctx.args.skipTo });
+              }
+              runtime.earlyReturn(value);
+            }
+            export function response(ctx) {
+              return ctx.result + ">first-response";
+            }
+            """;
+
+    private static final String APPENDING_FUNCTION = """
+            export function request(ctx) {
+              return { payload: ctx.prev.result + ">second" };
             }
             export function response(ctx) {
               return ctx.result;
@@ -197,6 +232,9 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createPipelineResolver(apiId, "Query", "earlyReturns", EARLY_RETURN_RESOLVER,
+                createFunction(apiId, "Query_earlyReturns_0", "local", EARLY_RETURN_FUNCTION),
+                createFunction(apiId, "Query_earlyReturns_1", "local", APPENDING_FUNCTION));
     }
 
     @Test
@@ -209,6 +247,24 @@ class AppSyncJsResolverDockerIntegrationTest {
             // chain ran, not just that something returned.
             .body("data.getMessages.name", contains("Acme 556677", "Globex"))
             .body("data.getMessages.id", contains("1", "2"));
+    }
+
+    @Test
+    void anEarlyReturnInAFunctionsRequestRunsTheNextFunctionUnlessItSkipsToTheEnd() {
+        // AppSync's Runtime utilities page: the function's data source and response handler are
+        // skipped and the next function runs; skipTo END goes to the resolver's response handler.
+        query("{ earlyReturns }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.earlyReturns", equalTo("before>first>second>after"));
+        query("{ earlyReturns(skipTo: \\\"NEXT\\\") }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.earlyReturns", equalTo("before>first>second>after"));
+        query("{ earlyReturns(skipTo: \\\"END\\\") }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.earlyReturns", equalTo("before>first>after"));
     }
 
     @Test
@@ -447,7 +503,7 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     private static void createPipelineResolver(String apiId, String typeName, String fieldName,
-                                               String code, String functionId) {
+                                               String code, String... functionIds) {
         given()
             .header("Authorization", AUTH)
             .contentType("application/json")
@@ -456,7 +512,7 @@ class AppSyncJsResolverDockerIntegrationTest {
                  "runtime": {"name": "APPSYNC_JS", "runtimeVersion": "1.0.0"},
                  "pipelineConfig": {"functions": ["%s"]},
                  "code": "%s"}
-                """.formatted(typeName, fieldName, functionId, escape(code)))
+                """.formatted(typeName, fieldName, String.join("\", \"", functionIds), escape(code)))
         .when()
             .post("/v1/apis/" + apiId + "/types/" + typeName + "/resolvers")
         .then()

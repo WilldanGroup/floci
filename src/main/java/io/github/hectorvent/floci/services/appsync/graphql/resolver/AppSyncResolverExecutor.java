@@ -47,12 +47,20 @@ import java.util.Set;
  * returned. A stage with no {@code response()} handler at all has nothing to make that decision, so
  * there the error fails the field.
  *
- * <p>Two things stop resolver execution early. {@code runtime.earlyReturn(value)} or VTL
- * {@code #return(value)} in a resolver template makes {@code value} the field's result immediately,
- * skipping everything left including the after step, and {@code util.error()} fails the field. A
- * VTL function's {@code #return(value)} only returns from that function and the pipeline continues.
- * {@code util.appendError} does neither: it collects errors that are returned <em>alongside</em>
- * the data, which is why a {@link ResolverOutcome} carries both rather than being a bare value.
+ * <p>{@code runtime.earlyReturn(value, {skipTo})} skips the rest of the stage that called it, and
+ * {@code value} is that stage's result, as AppSync's Runtime utilities page has it. From a UNIT
+ * resolver's handler, or a PIPELINE resolver's after step, {@code value} is the field's result. From
+ * a PIPELINE resolver's before step the functions are skipped and the after step runs with
+ * {@code value} as {@code ctx.prev.result}, unless it names {@code skipTo: 'NEXT'}, which runs the
+ * functions. From a function's request handler its data source and response handler are skipped,
+ * and from its response handler the rest of that handler; either way {@code value} is the
+ * function's result and the next function runs, or the after step after the last, unless it names
+ * {@code skipTo: 'END'}, which goes straight to the after step. VTL {@code #return(value)} in a
+ * resolver template makes {@code value} the field's result immediately, skipping everything left
+ * including the after step, and a VTL function's only returns from that function. {@code util.error()}
+ * fails the field. {@code util.appendError} stops nothing: it collects errors that are returned
+ * <em>alongside</em> the data, which is why a {@link ResolverOutcome} carries both rather than being
+ * a bare value.
  */
 @ApplicationScoped
 public class AppSyncResolverExecutor {
@@ -175,11 +183,13 @@ public class AppSyncResolverExecutor {
 
         private Map<String, Object> stash = new LinkedHashMap<>();
         private Object previousResult;
-        /** Set when a handler called runtime.earlyReturn: the pipeline stops and this is the value. */
+        /** Set when a VTL resolver template returned: the resolver stops and this is the value. */
         private boolean returned;
         private Object earlyReturnValue;
         /** A VTL function return stops only that function, not the whole resolver pipeline. */
         private boolean vtlFunctionReturned;
+        /** Set when a JS handler called runtime.earlyReturn, for the stage that called it to read. */
+        private EarlyReturn earlyReturn;
 
         private Execution(Resolver resolver, ResolverInvocation invocation) {
             this.apiId = invocation.apiId();
@@ -200,6 +210,10 @@ public class AppSyncResolverExecutor {
             DataSource vtlDataSource = stage.vtl()
                     ? requireVtlDataSource(resolver.getDataSourceName(), "UNIT resolver") : null;
             Object request = callHandler(stage, REQUEST, null, null, null);
+            EarlyReturn early = takeEarlyReturn();
+            if (early != null) {
+                return result(early.value());
+            }
             if (returned) {
                 return result(earlyReturnValue);
             }
@@ -209,6 +223,7 @@ public class AppSyncResolverExecutor {
                     : invokeDataSource(resolver.getDataSourceName(), request);
             Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
+            takeEarlyReturn();
             return result(returned ? earlyReturnValue : response);
         }
 
@@ -220,44 +235,68 @@ public class AppSyncResolverExecutor {
             if (returned) {
                 return result(earlyReturnValue);
             }
-            List<FunctionConfiguration> functions = pipelineFunctions();
             previousResult = before;
-
-            for (FunctionConfiguration function : functions) {
-                Stage functionStage = Stage.of(function);
-                if (functionStage.vtl()) {
-                    validateVtlFunctionVersion(functionStage);
+            // An early return here skips the functions and goes to the after step, as skipTo END
+            // does; skipTo NEXT goes on to the first function.
+            EarlyReturn early = takeEarlyReturn();
+            if (early == null || early.toNext()) {
+                for (FunctionConfiguration function : pipelineFunctions()) {
+                    if (runFunction(function)) {
+                        break;
+                    }
                 }
-                Object request = callHandler(functionStage, REQUEST, null, null, null);
-                if (returned) {
-                    return result(earlyReturnValue);
-                }
-                if (consumeVtlFunctionReturn()) {
-                    previousResult = request;
-                    continue;
-                }
-                DataSource vtlDataSource = functionStage.vtl()
-                        ? requireVtlDataSource(function.getDataSourceName(),
-                                "function " + function.getName()) : null;
-                Invocation invocation = functionStage.vtl()
-                        ? invokeDataSource(vtlDataSource,
-                                prepareVtlDataSourceRequest(functionStage, vtlDataSource, request), true)
-                        : invokeDataSource(function.getDataSourceName(), request);
-                Object response = callHandler(functionStage, RESPONSE,
-                        invocation.result(), invocation.error(), invocation.result());
-                if (returned) {
-                    return result(earlyReturnValue);
-                }
-                consumeVtlFunctionReturn();
-                // Missing response handler: the data source result passes through, which is what a
-                // function with only a request handler does on AppSync.
-                previousResult = response;
             }
 
             // The after step has no data source of its own, so it never carries ctx.error: a
             // function whose error went unsuppressed stopped the pipeline before this point.
             Object after = callHandler(resolverStage, RESPONSE, previousResult, null, null);
+            takeEarlyReturn();
             return result(returned ? earlyReturnValue : after);
+        }
+
+        /**
+         * Runs one function and leaves its result in {@code previousResult}. Answers whether the
+         * pipeline goes straight to the after step, which an early return naming skipTo END asks.
+         */
+        private boolean runFunction(FunctionConfiguration function) {
+            Stage functionStage = Stage.of(function);
+            if (functionStage.vtl()) {
+                validateVtlFunctionVersion(functionStage);
+            }
+            Object request = callHandler(functionStage, REQUEST, null, null, null);
+            EarlyReturn early = takeEarlyReturn();
+            if (early != null) {
+                // AppSync skips this function's data source and response handler, and the value is
+                // the function's result.
+                previousResult = early.value();
+                return early.toEnd();
+            }
+            if (consumeVtlFunctionReturn()) {
+                previousResult = request;
+                return false;
+            }
+            DataSource vtlDataSource = functionStage.vtl()
+                    ? requireVtlDataSource(function.getDataSourceName(),
+                            "function " + function.getName()) : null;
+            Invocation invocation = functionStage.vtl()
+                    ? invokeDataSource(vtlDataSource,
+                            prepareVtlDataSourceRequest(functionStage, vtlDataSource, request), true)
+                    : invokeDataSource(function.getDataSourceName(), request);
+            Object response = callHandler(functionStage, RESPONSE,
+                    invocation.result(), invocation.error(), invocation.result());
+            early = takeEarlyReturn();
+            consumeVtlFunctionReturn();
+            // Missing response handler: the data source result passes through, which is what a
+            // function with only a request handler does on AppSync. An early return's value is
+            // what the handler returned.
+            previousResult = response;
+            return early != null && early.toEnd();
+        }
+
+        private EarlyReturn takeEarlyReturn() {
+            EarlyReturn taken = earlyReturn;
+            earlyReturn = null;
+            return taken;
         }
 
         private List<String> pipelineFunctionIds() {
@@ -473,6 +512,17 @@ public class AppSyncResolverExecutor {
          */
         private record Invocation(Object result, JsEvaluation.JsError error) {}
 
+        /** A JS handler's {@code runtime.earlyReturn}: its value, and the skipTo it named, if any. */
+        private record EarlyReturn(Object value, String skipTo) {
+            boolean toEnd() {
+                return "END".equals(skipTo);
+            }
+
+            boolean toNext() {
+                return "NEXT".equals(skipTo);
+            }
+        }
+
         private String regionOf(DataSource dataSource) {
             return AwsArnUtils.regionOrDefault(dataSource.getDataSourceArn(), null);
         }
@@ -520,8 +570,7 @@ public class AppSyncResolverExecutor {
                 this.stash = new LinkedHashMap<>(evaluation.stash());
             }
             if (evaluation.earlyReturn()) {
-                this.returned = true;
-                this.earlyReturnValue = evaluation.result();
+                this.earlyReturn = new EarlyReturn(evaluation.result(), evaluation.skipTo());
             }
             return evaluation.result();
         }

@@ -143,6 +143,28 @@ class AppSyncResolverExecutorTest {
         return new JsEvaluation(result, stash, false, List.of(), null, false);
     }
 
+    /** {@code runtime.earlyReturn(value)}, or with {@code {skipTo}} where it is not null. */
+    private static JsEvaluation earlyReturn(Object value, String skipTo) {
+        return new JsEvaluation(value, Map.of(), true, List.of(), null, false, skipTo);
+    }
+
+    /** A pipeline of fn1 then fn2 over one data source, under the resolver code "pipeline-code". */
+    private Resolver twoFunctionPipeline() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok("before"));
+        jsRuntime.script("fn1-code", "request", (h, ctx) -> ok(Map.of("statement", "one")));
+        jsRuntime.script("fn1-code", "response", (h, ctx) -> ok("first"));
+        jsRuntime.script("fn2-code", "request", (h, ctx) -> ok(Map.of("statement", "two")));
+        jsRuntime.script("fn2-code", "response", (h, ctx) -> ok("second"));
+        jsRuntime.script("pipeline-code", "response", (h, ctx) ->
+                ok(((Map<?, ?>) ctx.get("prev")).get("result") + ">after"));
+        return resolver;
+    }
+
     private DataSource dataSource(String name) {
         return dataSource(name, DataSourceType.RELATIONAL_DATABASE);
     }
@@ -251,17 +273,125 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void earlyReturnInTheBeforeStepSkipsTheFunctionsAndTheAfterStep() {
-        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
-        resolver.setPipelineConfig(Map.of("functions", List.of("missing")));
-        jsRuntime.script("pipeline-code", "request", (h, ctx) ->
-                new JsEvaluation(Map.of("cached", true), Map.of(), true, List.of(), null, false));
+    void earlyReturnInAUnitResolversRequestSkipsItsDataSourceAndResponse() {
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("accountDB");
+        jsRuntime.script("unit-code", "request", (h, ctx) -> earlyReturn(Map.of("cached", true), null));
+        jsRuntime.script("unit-code", "response", (h, ctx) -> ok("never"));
 
         ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(List.of("pipeline-code#request"), jsRuntime.calls);
+        assertEquals(List.of("unit-code#request"), jsRuntime.calls);
         assertTrue(invoker.requests.isEmpty(), "runtime.earlyReturn must not reach the data source");
         assertEquals(Map.of("cached", true), result.data());
+    }
+
+    @Test
+    void earlyReturnInTheBeforeStepSkipsTheFunctionsAndRunsTheAfterStep() {
+        // AppSync's Runtime utilities page: from a pipeline resolver's request handler the pipeline
+        // execution is skipped and the resolver's response handler is called immediately.
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("missing")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> earlyReturn(Map.of("cached", true), null));
+        jsRuntime.script("pipeline-code", "response", (h, ctx) ->
+                ok(Map.of("after", ((Map<?, ?>) ctx.get("prev")).get("result"))));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "pipeline-code#response"), jsRuntime.calls);
+        assertTrue(invoker.requests.isEmpty(), "runtime.earlyReturn must not reach the data source");
+        assertEquals(Map.of("after", Map.of("cached", true)), result.data());
+    }
+
+    @Test
+    void earlyReturnInAFunctionsRequestSkipsItsDataSourceAndResponseAndRunsTheNextFunction() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn1-code", "request", (h, ctx) -> earlyReturn("fn1-early", null));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request",
+                "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+        assertEquals(List.of(Map.of("statement", "two")), invoker.requests);
+        // The early return's value is fn1's result, which fn2 sees as ctx.prev.result.
+        assertEquals(Map.of("result", "fn1-early"), jsRuntime.contexts.get(2).get("prev"));
+        assertEquals("second>after", result.data());
+    }
+
+    @Test
+    void earlyReturnInTheLastFunctionsRequestGoesOnToTheAfterStep() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn2-code", "request", (h, ctx) -> earlyReturn("fn2-early", null));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
+                "fn2-code#request", "pipeline-code#response"), jsRuntime.calls);
+        assertEquals("fn2-early>after", result.data());
+    }
+
+    @Test
+    void earlyReturnInAFunctionsResponseRunsTheNextFunction() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn1-code", "response", (h, ctx) -> earlyReturn("fn1-early", null));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
+                "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+        assertEquals(Map.of("result", "fn1-early"), jsRuntime.contexts.get(3).get("prev"));
+        assertEquals("second>after", result.data());
+    }
+
+    @Test
+    void earlyReturnWithSkipToEndInAFunctionGoesStraightToTheAfterStep() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn1-code", "request", (h, ctx) -> earlyReturn("fn1-early", "END"));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request", "pipeline-code#response"),
+                jsRuntime.calls);
+        assertTrue(invoker.requests.isEmpty(), "skipTo END must not reach a data source");
+        assertEquals("fn1-early>after", result.data());
+    }
+
+    @Test
+    void earlyReturnWithSkipToEndInAFunctionsResponseGoesStraightToTheAfterStep() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn1-code", "response", (h, ctx) -> earlyReturn("fn1-early", "END"));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
+                "pipeline-code#response"), jsRuntime.calls);
+        assertEquals("fn1-early>after", result.data());
+    }
+
+    @Test
+    void earlyReturnWithSkipToNextInAFunctionRunsTheNextFunction() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("fn1-code", "request", (h, ctx) -> earlyReturn("fn1-early", "NEXT"));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request",
+                "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+        assertEquals(Map.of("result", "fn1-early"), jsRuntime.contexts.get(2).get("prev"));
+        assertEquals("second>after", result.data());
+    }
+
+    @Test
+    void earlyReturnWithSkipToNextInTheBeforeStepRunsTheFunctions() {
+        Resolver resolver = twoFunctionPipeline();
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> earlyReturn("before-early", "NEXT"));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
+                "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+        assertEquals(Map.of("result", "before-early"), jsRuntime.contexts.get(1).get("prev"));
+        assertEquals("second>after", result.data());
     }
 
     @Test
