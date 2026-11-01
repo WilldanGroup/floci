@@ -329,7 +329,7 @@ which is the one failure an emulator must not have.
 
 `@aws-appsync/utils` and `@aws-appsync/utils/rds` resolve to a shim the sidecar writes at boot, not
 the published package, so a resolver call never depends on npm being reachable. Covered:
-`util.error` / `appendError` / `unauthorized`, `util.autoId`, `util.time.*`, `util.dynamodb.*`,
+`util.error` / `appendError` / `unauthorized`, `util.autoId`, `util.autoUlid`, `util.time.*`, `util.dynamodb.*`,
 `util.parseJson` / `toJson` and the type predicates, `runtime.earlyReturn`, `extensions.*` (accepted,
 no-ops), and from `/rds`: `toJsonObject`, `sql`, `select`, `insert`, `update`, `remove`,
 `createPgStatement` and `typeHint`. Anything outside that set throws by name rather than answering
