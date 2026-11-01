@@ -14,11 +14,13 @@ import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.services.cloudformation.CfnCreateOnlyProperties;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -54,9 +56,16 @@ import java.util.function.Consumer;
  * attributes at create time and read back on update and delete, hence the
  * {@code delete(StackResource, String)} override.
  *
- * <p><b>Inline definitions only.</b> {@code DefinitionS3Location} and {@code CodeS3Location} are
- * refused with a clear message rather than silently producing an API with an empty schema or a
- * resolver with no code. Serverless Framework and the AppSync plugins inline both.
+ * <p><b>A definition or code by S3 location is read from Floci's own S3.</b> A schema's
+ * {@code DefinitionS3Location} and a function's or resolver's {@code CodeS3Location}, where the
+ * inline {@code Definition} or {@code Code} is absent, are read at each create and update that
+ * provisions the resource, and the object's text goes to the service as the inline property would
+ * have. The location is the String the CloudFormation reference types it as,
+ * {@code s3://<bucket>/<key>}, which {@code aws cloudformation package} writes. Any other form, or an
+ * object S3 cannot answer, fails the resource naming the property and the location, with S3's own
+ * code and words, rather than producing an API with an empty schema or a resolver with no code. An
+ * inline property, where given, is used as it is and no object is read. The request and response
+ * mapping templates' S3 locations are not read.
  */
 @ApplicationScoped
 public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
@@ -81,13 +90,16 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     private static final Set<String> OPAQUE_KEY_PROPERTIES = Set.of("EnvironmentVariables");
 
+    private static final String S3_SCHEME = "s3://";
+
     /**
      * Properties the provisioner fills itself, so a template that drops one still has it on the
-     * request: the identifiers, and the two the provisioner handles in its own call ({@code Tags}
-     * as a map, {@code EnvironmentVariables} as a second call).
+     * request: the identifiers, the two the provisioner handles in its own call ({@code Tags}
+     * as a map, {@code EnvironmentVariables} as a second call), and {@code CodeS3Location}, which is
+     * no API member: the provisioner reads it into {@code code}.
      */
-    private static final Set<String> NEVER_CLEARED =
-            Set.of("ApiId", "Name", "TypeName", "FieldName", "Tags", "EnvironmentVariables");
+    private static final Set<String> NEVER_CLEARED = Set.of("ApiId", "Name", "TypeName", "FieldName",
+            "Tags", "EnvironmentVariables", "CodeS3Location");
 
     /**
      * Required properties of a type, which a template cannot drop and the service cannot hold as
@@ -124,10 +136,12 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private static final long SCHEMA_POLL_MILLIS = 25L;
 
     private final AppSyncService appSyncService;
+    private final S3Service s3Service;
 
     @Inject
-    public AppSyncCfnProvisioner(AppSyncService appSyncService) {
+    public AppSyncCfnProvisioner(AppSyncService appSyncService, S3Service s3Service) {
         this.appSyncService = appSyncService;
+        this.s3Service = s3Service;
     }
 
     @Override
@@ -214,13 +228,12 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         String apiId = requiredApiId(req, GRAPHQL_SCHEMA);
         String definition = str(req.get("definition"));
         if (blank(definition)) {
-            if (req.get("definitionS3Location") != null) {
-                throw new AwsException("ValidationError", GRAPHQL_SCHEMA
-                        + " DefinitionS3Location is not supported by Floci; give the schema inline in"
-                        + " Definition instead.", 400);
+            Object location = req.get("definitionS3Location");
+            if (location == null) {
+                throw new AwsException("ValidationError",
+                        GRAPHQL_SCHEMA + " requires Definition or DefinitionS3Location.", 400);
             }
-            throw new AwsException("ValidationError",
-                    GRAPHQL_SCHEMA + " requires Definition.", 400);
+            definition = readS3Location(GRAPHQL_SCHEMA, "DefinitionS3Location", location, props);
         }
 
         appSyncService.startSchemaCreation(apiId, definition);
@@ -302,7 +315,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private void provisionFunction(StackResource r, JsonNode props, ProvisionContext ctx) {
         Map<String, Object> req = camelisedProperties(props, ctx);
         String apiId = requiredApiId(req, FUNCTION_CONFIGURATION);
-        rejectS3Code(req, FUNCTION_CONFIGURATION);
+        String code = codeFromS3(req, props, FUNCTION_CONFIGURATION);
         if (blank(str(req.get("name")))) {
             req.put("name", firstNonBlank(attribute(r, "Name"),
                     ctx.generatePhysicalName(r.getLogicalId(), 65, false)));
@@ -313,6 +326,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         if (update) {
             clearDropped(req, props, ctx, FUNCTION_CONFIGURATION);
         }
+        putCode(req, code);
         FunctionConfiguration fn = update
                 ? appSyncService.updateFunction(apiId, priorFunctionId, req)
                 : appSyncService.createFunction(apiId, req, ctx.region());
@@ -332,7 +346,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private void provisionResolver(StackResource r, JsonNode props, ProvisionContext ctx) {
         Map<String, Object> req = camelisedProperties(props, ctx);
         String apiId = requiredApiId(req, RESOLVER);
-        rejectS3Code(req, RESOLVER);
+        String code = codeFromS3(req, props, RESOLVER);
         String typeName = str(req.get("typeName"));
         String fieldName = str(req.get("fieldName"));
         if (blank(typeName) || blank(fieldName)) {
@@ -351,6 +365,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                 req.put("dataSourceName", null);
             }
         }
+        putCode(req, code);
         Resolver resolver = update
                 ? appSyncService.updateResolver(apiId, typeName, fieldName, req)
                 : appSyncService.createResolver(apiId, req, ctx.region());
@@ -479,11 +494,55 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         return "PIPELINE".equals(kind.toString());
     }
 
-    private void rejectS3Code(Map<String, Object> req, String resourceType) {
-        if (req.get("codeS3Location") != null) {
-            throw new AwsException("ValidationError", resourceType
-                    + " CodeS3Location is not supported by Floci; give the resolver code inline in"
-                    + " Code instead.", 400);
+    /**
+     * The code a function's or resolver's {@code CodeS3Location} names, read where the template gives
+     * no inline {@code Code}, or null where it gives one or neither. The location leaves the request
+     * either way: CreateFunction and CreateResolver take the code, not where it was.
+     */
+    private String codeFromS3(Map<String, Object> req, JsonNode props, String resourceType) {
+        Object location = req.remove("codeS3Location");
+        if (location == null || !blank(str(req.get("code")))) {
+            return null;
+        }
+        return readS3Location(resourceType, "CodeS3Location", location, props);
+    }
+
+    /**
+     * Puts code read from S3 on the request. After {@link #clearDropped}, since an update from an
+     * inline {@code Code} to a location drops {@code Code}, and its clear would otherwise replace
+     * the code just read with null.
+     */
+    private static void putCode(Map<String, Object> req, String code) {
+        if (code != null) {
+            req.put("code", code);
+        }
+    }
+
+    /**
+     * The text of the object an S3 location property names, read from Floci's own S3. The location
+     * is the String {@code s3://<bucket>/<key>}: the bucket is the text up to the first {@code /}
+     * after the scheme and the key all of the rest, slashes included. Any other value fails the
+     * resource naming the form, and a read S3 refuses fails it with S3's own code and message, so
+     * nothing is created from an empty definition or no code.
+     */
+    private String readS3Location(String resourceType, String property, Object location,
+                                  JsonNode props) {
+        String written = location instanceof String text ? text : String.valueOf(props.get(property));
+        String path = location instanceof String text && text.startsWith(S3_SCHEME)
+                ? text.substring(S3_SCHEME.length())
+                : null;
+        int slash = path == null ? -1 : path.indexOf('/');
+        if (slash <= 0 || slash == path.length() - 1) {
+            throw new AwsException("ValidationError", resourceType + " " + property + " " + written
+                    + " is not an S3 location; give it as s3://<bucket>/<key>.", 400);
+        }
+        String bucket = path.substring(0, slash);
+        String key = path.substring(slash + 1);
+        try {
+            return new String(s3Service.getObject(bucket, key, null).getData(), StandardCharsets.UTF_8);
+        } catch (AwsException e) {
+            throw new AwsException("ValidationError", resourceType + " " + property + " " + written
+                    + " could not be read from S3: " + e.getErrorCode() + ": " + e.getMessage(), 400);
         }
     }
 

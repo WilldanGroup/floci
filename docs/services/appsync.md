@@ -543,9 +543,18 @@ An `UpdateStack` that changes the API `Name` and one resolver's `Code` updates b
 AWS and on Floci: every id and ARN stays the same and no other resource is touched. Deleting the
 stack removes every resource.
 
-A `GraphQLSchema` with `DefinitionS3Location` and no inline `Definition`, and `CodeS3Location` on
-a `Resolver` or `FunctionConfiguration`, fail the resource with `ValidationError`. Give the schema
-inline in `Definition` and the code inline in `Code`.
+A `GraphQLSchema`'s `DefinitionS3Location`, and a `Resolver`'s or `FunctionConfiguration`'s
+`CodeS3Location`, are read from Floci's own S3 at each create and update that provisions the
+resource, where the inline `Definition` or `Code` is absent, so put the object in a Floci bucket
+first. The location is the String the CloudFormation reference gives, `s3://<bucket>/<key>`, the
+form `aws cloudformation package` writes for `DefinitionS3Location`: the bucket runs to the first
+`/` and the key is all of the rest. The object's text becomes the API's schema or the resolver's
+or function's `code`, which `GetResolver` and `GetFunction` answer byte for byte. An inline
+`Definition` or `Code`, where given, is used and no object is read. A location of any other form, a
+bucket with no key among them, fails the resource with `ValidationError` naming the property and the
+location, and so does one naming an object Floci's S3 does not hold, with S3's own error, such as
+`NoSuchKey`.
+`RequestMappingTemplateS3Location` and `ResponseMappingTemplateS3Location` are not read.
 
 `AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `DomainName`, `DomainNameApiAssociation`,
 `SourceApiAssociation` and `Type` are not provisioned. By default such a resource is stubbed: it
