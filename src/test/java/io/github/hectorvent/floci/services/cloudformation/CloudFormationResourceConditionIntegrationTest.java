@@ -68,6 +68,64 @@ class CloudFormationResourceConditionIntegrationTest {
     }
 
     /**
+     * A condition naming conditions declared after it reads their values, whatever the order of the
+     * section, so a resource and an output under it stand exactly when both of those hold.
+     * Evaluated in declaration order, each name it met still read false, and so did it.
+     */
+    @ParameterizedTest
+    @CsvSource({"on,true", "off,false"})
+    void aConditionNamingConditionsDeclaredAfterItReadsTheirValues(String feature, boolean stands) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-forward-" + suffix;
+        String queueName = "cond-forward-" + suffix;
+        createStack(stackName, """
+                {
+                  "Conditions": {
+                    "ProductionWithFeature": { "Fn::And": [ { "Condition": "IsProduction" }, { "Condition": "FeatureOn" } ] },
+                    "IsProduction": { "Fn::Equals": ["prod", "prod"] },
+                    "FeatureOn": { "Fn::Equals": ["%s", "on"] }
+                  },
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Condition": "ProductionWithFeature",
+                      "Properties": { "QueueName": "%s" }
+                    },
+                    "Always": { "Type": "AWS::SQS::Queue" }
+                  },
+                  "Outputs": {
+                    "QueueName": {
+                      "Condition": "ProductionWithFeature",
+                      "Value": { "Fn::GetAtt": ["Queue", "QueueName"] }
+                    }
+                  }
+                }
+                """.formatted(feature, queueName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            Response described = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/");
+            described.then().statusCode(200);
+            if (stands) {
+                getQueueUrl(queueName).then().statusCode(200).body(containsString(queueName));
+                described.then().body(containsString("<OutputKey>QueueName</OutputKey>"))
+                    .body(containsString("<OutputValue>" + queueName + "</OutputValue>"));
+            } else {
+                getQueueUrl(queueName).then().statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("AWS.SimpleQueueService.NonExistentQueue"));
+                described.then().body(not(containsString("<OutputKey>QueueName</OutputKey>")));
+            }
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
      * Fn::FindInMap inside Fn::Equals resolves through the template's mappings. Read as an empty
      * string, a mapped "false" made UseCode true, and the bucket was named after the mapped value.
      */
