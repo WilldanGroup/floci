@@ -474,6 +474,12 @@ FOUND_BY: dict[str, tuple[list[str], str]] = {
 # and whose action acts on one of those types, names it through the member, and the reader asks the service for the
 # ARN of the caller's resource at the other end.
 THROUGH: dict[str, tuple[list[str], str]] = {
+    "cloudformation:ChangeSetName": (
+        ["stack"],
+        "a change set is of the stack it was created for, and DescribeChangeSet, ExecuteChangeSet and "
+        "DeleteChangeSet act on that stack alone, so a request naming the change set by its ARN, with no StackName, "
+        "acts on it there (the reference gives the three actions the stack type, and their ChangeSetName 'The name "
+        "or Amazon Resource Name (ARN) of the change set')"),
     "redshift-data:SessionId": (
         ["cluster", "workgroup"],
         "a Data API session runs on the cluster or the serverless workgroup it was opened on (ListSessions filters "
@@ -872,12 +878,14 @@ def with_found(resources: list[dict], namespace: str, types: list[str], members:
 
 def with_through(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
     """The resources, and the one of the `THROUGH` types the action acts on that each member of the request naming
-    a resource of its service's own runs on."""
+    a resource of its service's own runs on; none where the member already fills a type the action acts on, which
+    it names itself."""
+    filled = {member for resource in resources for member in resource.get("fill", {}).values()}
     through = []
     for key, (kinds, _) in sorted(THROUGH.items()):
         member = key.split(":", 1)[1]
         on = [kind for kind in types if kind in kinds]
-        if key.startswith(f"{namespace}:") and on and members.get(member) == member:
+        if key.startswith(f"{namespace}:") and on and members.get(member) == member and member not in filled:
             through.append({"types": on, "through": member})
     return resources + through
 

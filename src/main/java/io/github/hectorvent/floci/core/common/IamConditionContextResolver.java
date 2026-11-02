@@ -168,7 +168,8 @@ public class IamConditionContextResolver {
             "cloudformation:CreateChangeSet", "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet");
 
     /**
-     * {@code aws:ResourceTag/<key>} from the tags of the stack a request names, by name or ARN in {@code StackName},
+     * {@code aws:ResourceTag/<key>} from the tags of the stack a request names, by name or ARN in {@code StackName}, or
+     * of the stack a change set it names by its ARN alone belongs to,
      * the resource the Service Authorization Reference gives every stack action, change sets' included, with the key
      * among the stack's (Actions, resources, and condition keys for AWS CloudFormation); and
      * {@code cloudformation:ChangeSetName} as the request sends {@code ChangeSetName}, a name or an ARN, on
@@ -185,8 +186,12 @@ public class IamConditionContextResolver {
             conditions.put("cloudformation:ChangeSetName", List.of(changeSetName));
         }
         String stackName = form.get("StackName");
-        if (stackName != null && !stackName.isBlank() && cloudFormationService.isResolvable()) {
+        if (cloudFormationService.isResolvable()) {
             String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+            if ((stackName == null || stackName.isBlank()) && changeSetName != null) {
+                // A change set named by its ARN alone is acted on as the stack it belongs to.
+                stackName = cloudFormationService.get().through("ChangeSetName", changeSetName, region).orElse(null);
+            }
             cloudFormationService.get().stackTags(stackName, region, requestContext.getAccountId())
                     .forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
                             List.of(value == null ? "" : value)));

@@ -33,7 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * keys for AWS CloudFormation). A role granted the account's stacks only where a tag is set reads a tagged stack and
  * is refused an untagged one, as a role scoped to another stack's name is refused this one. And
  * {@code cloudformation:ChangeSetName} carries the change set's name as an execute or a delete sends it, a name or
- * an ARN, and is absent from a describe, as AWS was measured to carry it.
+ * an ARN, and is absent from a describe, as AWS was measured to carry it. A change set named by its ARN alone is
+ * checked on the stack it belongs to.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -109,6 +110,25 @@ class CloudFormationStackEnforcementIntegrationTest {
         cloudFormation(session, "DeleteChangeSet", "StackName", tagged, "ChangeSetName", byArn).statusCode(200);
         cloudFormation(session, "DeleteChangeSet", "StackName", tagged, "ChangeSetName", name(refused))
                 .statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    @Test
+    void aChangeSetNamedByItsArnAloneIsCheckedOnItsStackWithItsTags() {
+        String ofTagged = changeSet(tagged, "swb-" + UUID.randomUUID().toString().substring(0, 8));
+        String ofUntagged = changeSet(untagged, "swb-" + UUID.randomUUID().toString().substring(0, 8));
+        Session scoped = assumeRoleWith("""
+                {"Effect":"Allow","Action":"cloudformation:DescribeChangeSet",
+                 "Resource":"arn:aws:cloudformation:*:%s:stack/%s/*"}""".formatted(ACCOUNT, tagged));
+        Session byTag = assumeRoleWith("""
+                {"Effect":"Allow","Action":"cloudformation:DescribeChangeSet","Resource":"%s",
+                 "Condition":{"StringLike":{"aws:ResourceTag/swb:tenant":"*"}}}""".formatted(STACKS));
+
+        cloudFormation(scoped, "DescribeChangeSet", "ChangeSetName", ofTagged).statusCode(200);
+        cloudFormation(scoped, "DescribeChangeSet", "ChangeSetName", ofUntagged).statusCode(403)
+                .body(containsString("AccessDenied"));
+        cloudFormation(byTag, "DescribeChangeSet", "ChangeSetName", ofTagged).statusCode(200);
+        cloudFormation(byTag, "DescribeChangeSet", "ChangeSetName", ofUntagged).statusCode(403)
+                .body(containsString("AccessDenied"));
     }
 
     private void createStack(String name, boolean tag) {
