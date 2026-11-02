@@ -200,6 +200,73 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return displacedPhysicalId(resource) != null;
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return displacedPhysicalId(resource);
+    }
+
+    /**
+     * Once the stack update commits, an Update whose handler returned another physical id was a
+     * replacement, and the id it displaced is sent a Delete with the properties it last stood with,
+     * as CloudFormation sends one to the old resource. An update that kept the id owes none, nor
+     * does one whose {@code UpdateReplacePolicy} is {@code Retain}, and the snapshot the update kept
+     * for a rollback goes with the commit. A Delete the handler fails is counted for the engine,
+     * which tries it again, three times in all, and then reports it.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        String displaced = displacedPhysicalId(resource);
+        ObjectNode snapshot = readSnapshot(resource);
+        if (displaced == null || "Retain".equals(resource.getUpdateReplacePolicy())) {
+            resource.getAttributes().remove(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+            return UpdateCleanupResult.notApplicable();
+        }
+        int attempts = snapshot.path("cleanupAttempts").asInt(0);
+        try {
+            JsonNode response = sendDelete(resource, displaced, (ObjectNode) snapshot.get("properties"),
+                    snapshot.path("region").asText());
+            if (response != null) {
+                requireSuccess(response);
+            }
+            return new UpdateCleanupResult(true, true, displaced, attempts, null);
+        } catch (RuntimeException failed) {
+            snapshot.put("cleanupAttempts", attempts + 1);
+            resource.getAttributes().put(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+            return new UpdateCleanupResult(true, false, displaced, attempts + 1, failed.getMessage());
+        }
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /** The physical id the update in flight replaced, or null where it kept the id or sent nothing. */
+    private String displacedPhysicalId(StackResource resource) {
+        ObjectNode snapshot = readSnapshot(resource);
+        String prior = snapshot == null ? null : snapshot.path("physicalId").asText(null);
+        return prior == null || prior.equals(resource.getPhysicalId()) ? null : prior;
+    }
+
+    private ObjectNode readSnapshot(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            JsonNode snapshot = objectMapper.readTree(raw);
+            return snapshot.isObject() ? (ObjectNode) snapshot : null;
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the custom resource update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+    }
+
+    @Override
     public boolean rollbackUpdate(StackResource resource) {
         return rollbackUpdate(resource, event -> { });
     }

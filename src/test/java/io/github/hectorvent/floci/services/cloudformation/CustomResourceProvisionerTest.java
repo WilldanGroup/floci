@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -507,6 +508,58 @@ class CustomResourceProvisionerTest {
         assertEquals(createdStash, updated.getAttributes().get("__FlociResourceProperties"));
         assertEquals("hi", updated.getAttributes().get("Greeting"));
         assertFalse(updated.getAttributes().containsKey(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aCommittedReplacementSendsTheDisplacedIdADeleteWithItsOldProperties() {
+        respond(event -> success("bye".equals(message(event, "ResourceProperties")) ? "phys-456" : "phys-123",
+                Map.of()));
+        StackResource updated = update(create(), "bye");
+
+        assertTrue(provisioner.hasReplacementUpdate(updated));
+        assertEquals("phys-123", provisioner.updateCleanupPhysicalId(updated));
+        UpdateCleanupResult cleaned = provisioner.completeUpdate(updated);
+        assertTrue(cleaned.applicable());
+        assertTrue(cleaned.complete());
+        provisioner.clearUpdate(updated);
+
+        JsonNode delete = capturedEvents(3).get(2);
+        assertEquals("Delete", delete.get("RequestType").asText());
+        assertEquals("phys-123", delete.get("PhysicalResourceId").asText());
+        assertEquals("hi", message(delete, "ResourceProperties"));
+        assertEquals("phys-456", updated.getPhysicalId());
+        assertFalse(updated.getAttributes().containsKey(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aCommittedUpdateThatKeptTheIdSendsNoDelete() {
+        stubHandler("phys-123", Map.of());
+        StackResource updated = update(create(), "bye");
+
+        assertFalse(provisioner.hasReplacementUpdate(updated));
+        assertFalse(provisioner.completeUpdate(updated).applicable());
+
+        capturedEvents(2);
+        assertFalse(updated.getAttributes().containsKey(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aCleanupDeleteTheHandlerFailsIsCountedWithItsReason() {
+        respond(event -> switch (event.path("RequestType").asText()) {
+            case "Delete" -> failed("still in use");
+            default -> success("bye".equals(message(event, "ResourceProperties")) ? "phys-456" : "phys-123",
+                    Map.of());
+        });
+        StackResource updated = update(create(), "bye");
+
+        UpdateCleanupResult first = provisioner.completeUpdate(updated);
+        UpdateCleanupResult second = provisioner.completeUpdate(updated);
+
+        assertFalse(first.complete());
+        assertEquals("phys-123", first.previousPhysicalId());
+        assertEquals(1, first.attempts());
+        assertTrue(first.failureReason().contains("still in use"), first.failureReason());
+        assertEquals(2, second.attempts());
     }
 
     @Test
