@@ -22,9 +22,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -244,6 +246,31 @@ class LambdaExecutorServiceTest {
         assertEquals("END RequestId: req-log", lines.get(1));
         assertTrue(lines.get(2).matches("REPORT RequestId: req-log\\tDuration: \\d+\\.\\d{2} ms"
                 + "\\tBilled Duration: \\d+ ms\\tMemory Size: 256 MB"), lines.get(2));
+    }
+
+    @Test
+    void anInvocationAskedForItsLogTailIsAnsweredItsOutputBetweenLambdasLines() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-tail", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.markDispatched();
+            handle.output("the function's own line");
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "req-tail"));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult tailed = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, null, true);
+        InvokeResult plain = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, null);
+
+        String[] lines = new String(Base64.getDecoder().decode(tailed.getLogResult()),
+                StandardCharsets.UTF_8).split("\n");
+        assertTrue(lines[0].startsWith("START RequestId: "), lines[0]);
+        assertEquals("the function's own line", lines[1]);
+        assertTrue(lines[2].startsWith("END RequestId: "), lines[2]);
+        assertTrue(lines[3].startsWith("REPORT RequestId: "), lines[3]);
+        assertNull(plain.getLogResult());
     }
 
     @Test

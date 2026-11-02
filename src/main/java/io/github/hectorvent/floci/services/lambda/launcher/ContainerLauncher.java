@@ -481,7 +481,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Attach log streaming
         Closeable logHandle = logStreamer.attachForAccount(
                 lambdaAccountId, containerId, cwLogGroup, cwLogStream,
-                lambdaRegion, "lambda:" + fn.getFunctionName());
+                lambdaRegion, "lambda:" + fn.getFunctionName(), handle::output);
         handle.setLogStream(logHandle);
         handle.setPlatformLog(line -> logStreamer.streamToCloudWatchLogsForAccount(
                 lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion, line));
