@@ -745,6 +745,11 @@ before provisioning:
   `Number` parameter is refused as a string, as are `Fn::Select`, `Fn::Join`, `Fn::Sub`, `Fn::Base64`, a
   pseudo-parameter but `AWS::NotificationARNs`, and an `Fn::If` choosing one of these:
   `Property [Architectures] expected type: JSONArray, found: String`.
+- A `Ref` to a `CommaDelimitedList` or `List<...>` parameter results in its members, split at each
+  comma and each space trimmed, wherever the template uses it: a custom resource's handler receives
+  `"a, b"` as `["a","b"]` in `ResourceProperties`, and `Fn::Join` and `Fn::Select` read the same members.
+  A `String` parameter holding commas stays one string. A parent's `String` handed to a nested stack's
+  list parameter is that stack's list.
 - **`AWS::SSM::Parameter::Value<String>`-typed parameters** are resolved at deploy time: the value the
   caller supplies is treated as an SSM parameter *name*, and floci substitutes the current value of
   that SSM parameter into the template. This is the pattern CDK uses to pull bootstrap values (image
