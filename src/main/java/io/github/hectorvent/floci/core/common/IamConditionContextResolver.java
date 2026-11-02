@@ -382,7 +382,10 @@ public class IamConditionContextResolver {
 
     private Map<String, List<String>> s3ActionConditionContext(String action, ContainerRequestContext ctx) {
         return switch (action) {
-            case "s3:ListBucket" -> s3BucketListConditionContext(ctx.getUriInfo().getQueryParameters());
+            // ListObjectVersions is checked as s3:ListBucketVersions, which takes the same keys
+            // (Service Authorization Reference, Amazon S3).
+            case "s3:ListBucket", "s3:ListBucketVersions" ->
+                    s3BucketListConditionContext(ctx.getUriInfo().getQueryParameters());
             // DeleteBucketTagging is checked as s3:PutBucketTagging, and sends no tags of its own:
             // what it has is the bucket's current tags, as GetBucketTagging does.
             case "s3:PutBucketTagging" -> "DELETE".equalsIgnoreCase(ctx.getMethod())

@@ -87,6 +87,77 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                 .body(containsString("<Code>AccessDenied</Code>"));
     }
 
+    /**
+     * ListObjectVersions is checked as {@code s3:ListBucketVersions}, which takes {@code s3:prefix} as
+     * {@code s3:ListBucket} does (Service Authorization Reference, Amazon S3), so a grant conditioned on the
+     * prefix lists the versions under it and is refused another.
+     */
+    @Test
+    void listBucketVersionsGrantConditionedOnThePrefixListsUnderItAndIsRefusedAnother() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "versions-prefix-" + suffix;
+        String roleName = "VersionsPrefixRole" + suffix;
+
+        createBucket(bucket);
+        createRole(roleName);
+        given()
+                .formParam("Action", "PutRolePolicy")
+                .formParam("RoleName", roleName)
+                .formParam("PolicyName", "ListVersionsUnderPrefix")
+                .formParam("PolicyDocument", """
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Action": "s3:ListBucketVersions",
+                          "Resource": "arn:aws:s3:::%s",
+                          "Condition": { "StringLike": { "s3:prefix": "schemas/*" } }
+                        }
+                      ]
+                    }
+                    """.formatted(bucket))
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "iam"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+        putObject(bucket, "schemas/one.json");
+        putObject(bucket, "archive/one.json");
+
+        String accessKeyId = given()
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", "arn:aws:iam::" + ROLE_ACCOUNT_ID + ":role/" + roleName)
+                .formParam("RoleSessionName", "versions-prefix-test")
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "sts"))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract()
+                .path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .queryParam("versions", "")
+                .queryParam("prefix", "schemas/")
+        .when()
+                .get("/" + bucket)
+        .then()
+                .statusCode(200)
+                .body(containsString("<Key>schemas/one.json</Key>"));
+
+        given()
+                .header("Authorization", auth(accessKeyId, "s3"))
+                .queryParam("versions", "")
+                .queryParam("prefix", "archive/")
+        .when()
+                .get("/" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
     private static void createBucket(String bucket) {
         given()
                 .header("Authorization", auth(ROLE_ACCOUNT_ID, "s3"))
