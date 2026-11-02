@@ -203,8 +203,26 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
+            case "cloudformation" -> cloudFormationResources(operation, ctx, region, accountId, partition);
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
+    }
+
+    /**
+     * A CloudFormation request's resources from the table of request resources, and, where it names a change set by
+     * its ARN alone, with no {@code StackName}, the stack that change set belongs to, which CloudFormation's
+     * {@link StoredResourceArns} finds: the Service Authorization Reference gives DescribeChangeSet, ExecuteChangeSet
+     * and DeleteChangeSet the {@code stack} resource alone.
+     */
+    private List<String> cloudFormationResources(String operation, ContainerRequestContext ctx, String region,
+                                                 String accountId, String partition) {
+        List<String> named = namedResources("cloudformation", operation, ctx, region, accountId, partition);
+        String changeSet = firstFormParam(ctx, "ChangeSetName");
+        StoredResourceArns stored = storedResourceArns("cloudformation");
+        if (!List.of("*").equals(named) || changeSet == null || stored == null) {
+            return named;
+        }
+        return stored.find("stack", changeSet, region).map(List::of).orElse(named);
     }
 
     /**

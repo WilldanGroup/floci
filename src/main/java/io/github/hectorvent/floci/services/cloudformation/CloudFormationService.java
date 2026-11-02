@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -70,7 +71,7 @@ import java.util.stream.Collectors;
  * CloudFormation stack lifecycle management — Create, Update, Delete stacks via ChangeSets.
  */
 @ApplicationScoped
-public class CloudFormationService implements ResourceProvider {
+public class CloudFormationService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
@@ -4437,6 +4438,27 @@ public class CloudFormationService implements ResourceProvider {
                     "Stack with id " + stackNameOrArn + " does not exist", 400);
         }
         return stack;
+    }
+
+    @Override
+    public String namespace() {
+        return "cloudformation";
+    }
+
+    /**
+     * For {@code type} {@code stack} and a {@code name} that is a change set's ARN, the ARN of the caller's stack
+     * that change set belongs to in the Region: CloudFormation authorizes a change set's actions on its stack, which
+     * a request naming the change set by its ARN alone does not name (Service Authorization Reference, AWS
+     * CloudFormation: DescribeChangeSet, ExecuteChangeSet and DeleteChangeSet act on {@code stack}). Empty for
+     * anything else, or a change set that is not found.
+     */
+    @Override
+    public Optional<String> find(String type, String name, String region) {
+        if (!"stack".equals(type) || name == null || !AwsArnUtils.looksLikeArn(name) || !name.contains(":changeSet/")) {
+            return Optional.empty();
+        }
+        Stack stack = findStackForChangeSetArn(name, region, currentAccount());
+        return stack == null ? Optional.empty() : Optional.of(stack.getStackId());
     }
 
     /**
