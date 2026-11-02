@@ -119,8 +119,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
-              "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
+NAMESPACES = ("acm", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudformation",
+              "cloudtrail", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
               "events", "firehose", "globalaccelerator", "kinesisanalytics", "servicediscovery", "servicequotas",
               "states", "textract", "timestream-influxdb", "translate")
 
@@ -164,7 +164,6 @@ NOT_COVERED: dict[str, str] = {
     "batch": _REST,
     "bedrock": _LATER,
     "bedrock-agentcore": _REST,
-    "cloudformation": _LATER,
     "cloudfront": _REST,
     "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
                 "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "

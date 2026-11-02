@@ -4439,6 +4439,18 @@ public class CloudFormationService implements ResourceProvider {
         return stack;
     }
 
+    /**
+     * The tags of the caller's stack that {@code stackNameOrArn} names in the Region, standing or deleted, which IAM
+     * reads as {@code aws:ResourceTag/<key>} on an action on it; empty where no such stack is found.
+     */
+    public Map<String, String> stackTags(String stackNameOrArn, String region, String accountId) {
+        if (stackNameOrArn == null || stackNameOrArn.isBlank()) {
+            return Map.of();
+        }
+        Stack stack = resolveStackForDescribe(stackNameOrArn, region, accountId);
+        return stack == null ? Map.of() : stack.tagsSnapshot();
+    }
+
     private Stack resolveStackForDescribe(String stackNameOrArn, String region) {
         return resolveStackForDescribe(stackNameOrArn, region, currentAccount());
     }

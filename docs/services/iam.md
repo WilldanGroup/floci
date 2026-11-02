@@ -1599,8 +1599,8 @@ Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. 
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
-AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
-Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, CloudFormation and
+Amazon Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -2438,7 +2438,13 @@ floci populates:
   once per resource and denied when any of them fails the condition, as on AWS.
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
-  `logs:DeleteRetentionPolicy` use the owning log group's tags.
+  `logs:DeleteRetentionPolicy` use the owning log group's tags. A CloudFormation action on a stack, a change
+  set's included, uses the tags of the stack its `StackName` names, by name or ARN, standing or deleted; a stack
+  set's tags are not read yet.
+- `cloudformation:ChangeSetName`: the `ChangeSetName` a request sends, a name or an ARN, on
+  `cloudformation:CreateChangeSet`, `cloudformation:ExecuteChangeSet` and `cloudformation:DeleteChangeSet`. The
+  Service Reference lists it for `cloudformation:DescribeChangeSet` too, where AWS was measured to carry it in no
+  form, so a describe has no value for it.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
@@ -98,6 +99,7 @@ public class IamConditionContextResolver {
     private final Instance<CloudWatchLogsService> logsService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
+    private final Instance<CloudFormationService> cloudFormationService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
@@ -115,12 +117,13 @@ public class IamConditionContextResolver {
                                        Instance<CloudWatchLogsService> logsService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
+                                       Instance<CloudFormationService> cloudFormationService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, requestContext,
-                config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, cloudFormationService,
+                requestContext, config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
@@ -129,6 +132,7 @@ public class IamConditionContextResolver {
                                 Instance<CloudWatchLogsService> logsService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
+                                Instance<CloudFormationService> cloudFormationService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
@@ -139,6 +143,7 @@ public class IamConditionContextResolver {
         this.logsService = logsService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
+        this.cloudFormationService = cloudFormationService;
         this.requestContext = requestContext;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
@@ -155,8 +160,40 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
+            case "cloudformation" -> cloudFormationConditionContext(action, ctx);
             default -> null;
         };
+    }
+
+    /** The change set actions that carry {@code cloudformation:ChangeSetName}, as AWS was measured to carry it. */
+    private static final Set<String> CHANGE_SET_NAME_ACTIONS = Set.of(
+            "cloudformation:CreateChangeSet", "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet");
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the tags of the stack a request names, by name or ARN in {@code StackName},
+     * the resource the Service Authorization Reference gives every stack action, change sets' included, with the key
+     * among the stack's (Actions, resources, and condition keys for AWS CloudFormation); and
+     * {@code cloudformation:ChangeSetName} as the request sends {@code ChangeSetName}, a name or an ARN, on
+     * CreateChangeSet, ExecuteChangeSet and DeleteChangeSet. The Reference lists the key for DescribeChangeSet too,
+     * but AWS was measured to carry it there in no form: a role allowed DescribeChangeSet only under the key is
+     * refused it by name, by ARN and with the stack, and allowed once the condition goes. A stack set's tags are
+     * not read yet.
+     */
+    private Map<String, List<String>> cloudFormationConditionContext(String action, ContainerRequestContext ctx) {
+        Map<String, String> form = formParameters(ctx);
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        String changeSetName = form.get("ChangeSetName");
+        if (changeSetName != null && !changeSetName.isBlank() && CHANGE_SET_NAME_ACTIONS.contains(action)) {
+            conditions.put("cloudformation:ChangeSetName", List.of(changeSetName));
+        }
+        String stackName = form.get("StackName");
+        if (stackName != null && !stackName.isBlank() && cloudFormationService.isResolvable()) {
+            String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+            cloudFormationService.get().stackTags(stackName, region, requestContext.getAccountId())
+                    .forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
+                            List.of(value == null ? "" : value)));
+        }
+        return conditions.isEmpty() ? null : conditions;
     }
 
     /** Group mutations and stream access use the handler's group and request scope. */

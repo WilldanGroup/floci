@@ -115,7 +115,7 @@ class IamConditionContextResolverTest {
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
-                lambdaWebServiceInstance,
+                lambdaWebServiceInstance, mock(Instance.class),
                 requestContext, config,
                 null, serviceCatalog);
     }
@@ -605,7 +605,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext,
+                config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
