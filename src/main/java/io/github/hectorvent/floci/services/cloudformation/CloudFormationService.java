@@ -1349,10 +1349,25 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
 
     /** The {@code DeleteStack} operation, in the caller's account, for a request that may carry a token. */
     public Future<?> deleteStackForRequest(String stackName, String region, String clientRequestToken) {
-        return deleteStack(stackName, region, regionResolver.getAccountId(), clientRequestToken);
+        return deleteStackForRequest(stackName, region, clientRequestToken, List.of());
+    }
+
+    /**
+     * As above, keeping the resources {@code retainResources} names where the stack stands {@code DELETE_FAILED}:
+     * the stack is deleted and they are not, as DeleteStack's {@code RetainResources} has it for a resource that
+     * cannot be deleted, such as a bucket that is not empty.
+     */
+    public Future<?> deleteStackForRequest(String stackName, String region, String clientRequestToken,
+                                           List<String> retainResources) {
+        return deleteStack(stackName, region, regionResolver.getAccountId(), clientRequestToken, retainResources);
     }
 
     private Future<?> deleteStack(String stackName, String region, String accountId, String clientRequestToken) {
+        return deleteStack(stackName, region, accountId, clientRequestToken, List.of());
+    }
+
+    private Future<?> deleteStack(String stackName, String region, String accountId, String clientRequestToken,
+                                  List<String> retainResources) {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region, accountId);
         if (stack == null) {
@@ -1388,13 +1403,15 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
                                 + "] cannot be deleted while TerminationProtection is enabled", 400);
             }
             StackMutationSnapshot snapshot = snapshot(existing);
+            Set<String> retained = "DELETE_FAILED".equals(existing.getStatus())
+                    ? Set.copyOf(retainResources) : Set.of();
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus("DELETE_IN_PROGRESS");
             addEvent(existing, existing.getStackName(), existing.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
             try {
                 submitted[0] = submitOperation(() -> RequestScopes.runAs(accountId, region,
-                        () -> deleteStackResources(existing, region, accountId)));
+                        () -> deleteStackResources(existing, region, accountId, retained)));
             } catch (AwsException e) {
                 restore(existing, snapshot);
                 throw e;
@@ -3807,6 +3824,11 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {
+        deleteStackResources(stack, region, accountId, Set.of());
+    }
+
+    /** Deletes the stack's resources but those {@code retained} names, which stand as DELETE_SKIPPED. */
+    void deleteStackResources(Stack stack, String region, String accountId, Set<String> retained) {
         try {
             List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
@@ -3824,6 +3846,12 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
                     continue;
                 }
                 if (skipRetainedResource(stack, resource, false)) {
+                    continue;
+                }
+                if (retained.contains(resource.getLogicalId())) {
+                    resource.setStatus("DELETE_SKIPPED");
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "DELETE_SKIPPED", null);
                     continue;
                 }
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
