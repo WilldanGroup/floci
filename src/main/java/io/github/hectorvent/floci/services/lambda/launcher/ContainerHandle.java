@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 
 import java.io.Closeable;
+import java.util.function.Consumer;
 
 /**
  * Wraps a running Lambda Docker container and its associated Runtime API server.
@@ -20,6 +21,7 @@ public class ContainerHandle {
     private volatile ContainerState state;
     private volatile long lastUsedMs;
     private Closeable logStream;
+    private volatile Consumer<String> platformLog = line -> { };
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state) {
@@ -59,6 +61,10 @@ public class ContainerHandle {
 
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+
+    /** Writes a line of Lambda's own, a START, END or REPORT, to the log stream the function's output goes to. */
+    public void platformLog(String line) { platformLog.accept(line); }
+    public void setPlatformLog(Consumer<String> platformLog) { this.platformLog = platformLog; }
 
     /**
      * True once an extension in this container reported an init or exit error. Real AWS treats

@@ -483,6 +483,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 lambdaAccountId, containerId, cwLogGroup, cwLogStream,
                 lambdaRegion, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
+        handle.setPlatformLog(line -> logStreamer.streamToCloudWatchLogsForAccount(
+                lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion, line));
 
         return handle;
         } catch (RuntimeException e) {

@@ -277,6 +277,48 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void anInvocationTheRuntimeTookIsLoggedStartEndAndReport() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-log", "test-fn", rtas, ContainerState.WARM);
+        List<String> lines = new CopyOnWriteArrayList<>();
+        handle.setPlatformLog(lines::add);
+        fn.setMemorySize(256);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.markDispatched();
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "req-log"));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, "req-log");
+
+        assertEquals(3, lines.size(), lines.toString());
+        assertEquals("START RequestId: req-log Version: $LATEST", lines.get(0));
+        assertEquals("END RequestId: req-log", lines.get(1));
+        assertTrue(lines.get(2).matches("REPORT RequestId: req-log\\tDuration: \\d+\\.\\d{2} ms"
+                + "\\tBilled Duration: \\d+ ms\\tMemory Size: 256 MB"), lines.get(2));
+    }
+
+    @Test
+    void anInvocationTheRuntimeNeverTookLogsNoLine() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-nolog", "test-fn", rtas, ContainerState.WARM);
+        List<String> lines = new CopyOnWriteArrayList<>();
+        handle.setPlatformLog(lines::add);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "req-nolog"));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, "req-nolog");
+
+        assertEquals(List.of(), lines);
+    }
+
+    @Test
     void dispatchWait_coldRuntimeGetsTheInitBudget() {
         LambdaExecutorService withBudget =
                 registerExecutor(new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 10));
