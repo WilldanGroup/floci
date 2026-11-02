@@ -121,6 +121,7 @@ import io.floci.aws.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.TransferCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.WafV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.WaitConditionHandleCfnProvisioner;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudmap.CloudMapService;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
@@ -321,6 +322,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
+            if (config != null) {
+                discovered.add(new WaitConditionHandleCfnProvisioner(config));
+            }
             if (signerService != null) {
                 discovered.add(new SignerCfnProvisioner(signerService));
             }
