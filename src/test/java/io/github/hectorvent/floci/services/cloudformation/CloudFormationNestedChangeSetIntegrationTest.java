@@ -16,6 +16,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A change set created with {@code IncludeNestedStacks} plans a change set on each nested stack it modifies, as the
@@ -112,6 +113,60 @@ class CloudFormationNestedChangeSetIntegrationTest {
                 + ".ResourceChange.ChangeSetId")));
     }
 
+    @Test
+    void aNestedStackTheUpdateAddsIsPlannedOnAStackInReviewWhichDeletingTheRootRemoves() {
+        String placeholder = "nested-cs-added-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", "StackName", placeholder, "TemplateBody",
+                "{\"Resources\":{\"Placeholder\":{\"Type\":\"AWS::SQS::Queue\"}}}").statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(placeholder).status());
+        cfn("CreateChangeSet", "StackName", placeholder, "ChangeSetName", "first",
+                "TemplateBody", parentTemplate("child-v2.json"), "IncludeNestedStacks", "true").statusCode(200);
+        awaitCreated(placeholder, "first");
+
+        XmlPath rootRead = describe("StackName", placeholder, "ChangeSetName", "first");
+        assertEquals("Add", rootRead.getString(path("Changes.member.find { it.ResourceChange.LogicalResourceId == "
+                + "'Child' }.ResourceChange.Action")));
+        String nested = rootRead.getString(path("Changes.member.find { it.ResourceChange.LogicalResourceId == "
+                + "'Child' }.ResourceChange.ChangeSetId"));
+        assertTrue(nested.contains(":changeSet/"), nested);
+
+        XmlPath nestedRead = describe("ChangeSetName", nested);
+        assertEquals(rootRead.getString(path("ChangeSetId")), nestedRead.getString(path("ParentChangeSetId")));
+        assertEquals("CREATE_COMPLETE", nestedRead.getString(path("Status")));
+        assertEquals("UNAVAILABLE", nestedRead.getString(path("ExecutionStatus")));
+        assertEquals(List.of("One", "Two"), nestedRead.getList(path("Changes.member.ResourceChange.LogicalResourceId")));
+        String plannedOn = nestedRead.getString(path("StackName"));
+        assertTrue(plannedOn.startsWith(placeholder + "-Child-"), plannedOn);
+        assertEquals("REVIEW_IN_PROGRESS", cfn("DescribeStacks", "StackName", plannedOn).statusCode(200)
+                .extract().xmlPath().getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus"));
+
+        cfn("DeleteChangeSet", "StackName", placeholder, "ChangeSetName", "first").statusCode(200);
+        cfn("DescribeChangeSet", "ChangeSetName", nested).statusCode(400)
+                .body(containsString("ChangeSetNotFound"));
+        cfn("DescribeStacks", "StackName", plannedOn).statusCode(400).body(containsString("does not exist"));
+    }
+
+    @Test
+    void executingARootThatAddsANestedStackStandsItAndRemovesThePlannedOne() {
+        String placeholder = "nested-cs-added-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", "StackName", placeholder, "TemplateBody",
+                "{\"Resources\":{\"Placeholder\":{\"Type\":\"AWS::SQS::Queue\"}}}").statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(placeholder).status());
+        cfn("CreateChangeSet", "StackName", placeholder, "ChangeSetName", "first",
+                "TemplateBody", parentTemplate("child-v1.json"), "IncludeNestedStacks", "true").statusCode(200);
+        awaitCreated(placeholder, "first");
+        String plannedOn = describe("ChangeSetName", describe("StackName", placeholder, "ChangeSetName", "first")
+                .getString(path("Changes.member.find { it.ResourceChange.LogicalResourceId == 'Child' }"
+                        + ".ResourceChange.ChangeSetId"))).getString(path("StackName"));
+
+        cfn("ExecuteChangeSet", "StackName", placeholder, "ChangeSetName", "first").statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(placeholder).status());
+        assertEquals(List.of("Child"), cfn("DescribeStackResources", "StackName", placeholder).statusCode(200)
+                .extract().xmlPath().getList("DescribeStackResourcesResponse.DescribeStackResourcesResult"
+                        + ".StackResources.member.LogicalResourceId"));
+        cfn("DescribeStacks", "StackName", plannedOn).statusCode(400).body(containsString("does not exist"));
+    }
+
     /** A root change set moving the child to its second template: its ARN, once created. */
     private String createRoot(String name) {
         String id = cfn("CreateChangeSet", "StackName", parent, "ChangeSetName", name,
@@ -122,8 +177,12 @@ class CloudFormationNestedChangeSetIntegrationTest {
     }
 
     private void awaitCreated(String name) {
+        awaitCreated(parent, name);
+    }
+
+    private static void awaitCreated(String stack, String name) {
         for (int attempt = 0; attempt < 100; attempt++) {
-            String status = describe("StackName", parent, "ChangeSetName", name).getString(path("Status"));
+            String status = describe("StackName", stack, "ChangeSetName", name).getString(path("Status"));
             if ("CREATE_COMPLETE".equals(status) || "FAILED".equals(status)) {
                 return;
             }

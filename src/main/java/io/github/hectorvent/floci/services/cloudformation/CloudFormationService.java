@@ -2434,8 +2434,10 @@ public class CloudFormationService implements ResourceProvider {
      * CloudFormation does (CloudFormation User Guide, Change sets for nested stacks): one on each nested stack the
      * change set modifies, from that stack's new template and the parameters the parent's new template hands it,
      * resolved against what stands, with the change set above it as its parent and the root as its root, executable
-     * only from the root; and so on down the hierarchy. A nested stack the change set adds or removes gets none. One
-     * that cannot be planned fails the change set above it, naming the nested stack and why.
+     * only from the root; and so on down the hierarchy. A nested stack the change set adds gets a CREATE change set on
+     * a stack of its own in {@code REVIEW_IN_PROGRESS}, named as CloudFormation names a nested stack, which goes when
+     * the root is executed or deleted; one it removes gets none. One that cannot be planned fails the change set above
+     * it, naming the nested stack and why.
      */
     public void planNestedChangeSets(ChangeSet root, String region) {
         root.setIncludeNestedStacks(true);
@@ -2459,24 +2461,35 @@ public class CloudFormationService implements ResourceProvider {
         }
         CloudFormationTemplateEngine engine = null;
         for (ResourceChange change : computeChangeSetChanges(parent, region)) {
-            if (!"AWS::CloudFormation::Stack".equals(change.resourceType()) || !"Modify".equals(change.action())) {
+            boolean adds = "Add".equals(change.action());
+            if (!"AWS::CloudFormation::Stack".equals(change.resourceType())
+                    || !(adds || "Modify".equals(change.action()))) {
                 continue;
             }
-            StackResource standing = stack.getResources().get(change.logicalResourceId());
-            Stack child = standing == null || standing.getPhysicalId() == null ? null
-                    : resolveStack(standing.getPhysicalId(), region, accountId);
-            if (child == null) {
-                continue;
+            Stack child = null;
+            if (!adds) {
+                StackResource standing = stack.getResources().get(change.logicalResourceId());
+                child = standing == null || standing.getPhysicalId() == null ? null
+                        : resolveStack(standing.getPhysicalId(), region, accountId);
+                if (child == null) {
+                    continue;
+                }
             }
             try {
                 if (engine == null) {
                     engine = planningEngine(stack, template, parent.getParameters(), region, accountId);
                 }
                 JsonNode props = template.path("Resources").path(change.logicalResourceId()).path("Properties");
-                ChangeSet nested = createChangeSet(child.getStackName(),
-                        nestedChangeSetName(parent.getChangeSetName(), change.logicalResourceId()), "UPDATE", null,
+                String childName = adds ? plannedNestedStackName(stack.getStackName(), change.logicalResourceId())
+                        : child.getStackName();
+                ChangeSet nested = createChangeSet(childName,
+                        nestedChangeSetName(parent.getChangeSetName(), change.logicalResourceId()),
+                        adds ? "CREATE" : "UPDATE", null,
                         engine.resolve(props.path("TemplateURL")), nestedStackParameters(props, engine),
                         parent.getCapabilities(), null, region, accountId, false, false);
+                if (adds) {
+                    child = resolveStack(childName, region, accountId);
+                }
                 nested.setIncludeNestedStacks(true);
                 nested.setParentChangeSetId(parent.getChangeSetId());
                 nested.setRootChangeSetId(rootChangeSetId);
@@ -2494,6 +2507,16 @@ public class CloudFormationService implements ResourceProvider {
                 return;
             }
         }
+    }
+
+    /**
+     * The stack a nested stack the change set adds is planned on: its parent's name, its logical ID and a suffix, as
+     * CloudFormation names a nested stack, within a name's 128 characters, so it meets no stack the execution creates.
+     */
+    private static String plannedNestedStackName(String parentName, String logicalId) {
+        String suffix = "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase(Locale.ROOT);
+        String name = parentName + "-" + logicalId;
+        return (name.length() + suffix.length() <= 128 ? name : name.substring(0, 128 - suffix.length())) + suffix;
     }
 
     /** A nested change set's name: its parent's and the nested stack's logical ID, within a name's 128 characters. */
@@ -2544,8 +2567,23 @@ public class CloudFormationService implements ResourceProvider {
             }
             removeNestedChangeSets(nested, region, accountId);
             child.getChangeSets().remove(nested.getChangeSetName());
-            persistStack(child);
+            if ("REVIEW_IN_PROGRESS".equals(child.getStatus()) && child.getChangeSets().isEmpty()) {
+                forgetPlannedStack(child, region);
+            } else {
+                persistStack(child);
+            }
         }
+    }
+
+    /** Removes a stack a nested change set was planned on, which never held a resource, as a deleted stack goes. */
+    private void forgetPlannedStack(Stack stack, String region) {
+        stack.setDeletionTime(now());
+        stack.setStatus("DELETE_COMPLETE");
+        deletedStacks.put(stack.getStackId(), new DeletedStackEntry(
+                stack,
+                now().plusSeconds(config.services().cloudformation().deletedStackRetentionSeconds())));
+        stacks.remove(stackKey(ownerAccount(stack), stack.getStackName(), region));
+        unpersistStack(ownerAccount(stack), stack.getStackName(), region);
     }
 
     private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
