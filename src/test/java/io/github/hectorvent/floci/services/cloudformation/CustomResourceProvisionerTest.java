@@ -270,6 +270,17 @@ class CustomResourceProvisionerTest {
     }
 
     @Test
+    void deleteThatTheHandlerFailsFailsWithItsReason() {
+        respond(event -> "Delete".equals(event.path("RequestType").asText())
+                ? failed("refused by its grants") : success("phys-123", Map.of()));
+        StackResource r = create();
+
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.delete(r, "us-east-1"));
+
+        assertTrue(refused.getMessage().contains("refused by its grants"), refused.getMessage());
+    }
+
+    @Test
     void resourceOutsideAStackGetsOneStackIdForCreateAndDelete() {
         stubHandler("phys-123", Map.of());
         // Cloud Control's engine has no stack, so its stack id is not an ARN.

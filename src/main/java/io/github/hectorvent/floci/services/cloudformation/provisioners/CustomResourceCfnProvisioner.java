@@ -158,32 +158,45 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(CR_PROPERTIES_ATTR, resourceProperties.toString());
     }
 
+    /**
+     * Sends the handler its Delete and holds the resource to the answer, as CloudFormation does: a
+     * handler that answers FAILED fails the resource's delete, and the stack's with it.
+     */
     @Override
     public void delete(StackResource r, String region) {
         ObjectNode stashed = readStashedProperties(r);
-        deleteWith(r, stashed != null ? stashed : objectMapper.createObjectNode(), region);
+        JsonNode response = sendDelete(r, r.getPhysicalId(),
+                stashed != null ? stashed : objectMapper.createObjectNode(), region);
+        if (response != null) {
+            requireSuccess(response);
+        }
     }
 
+    /** The Delete a rollback sends the replacement it undoes, whose failure the rollback does not wait on. */
     private void deleteWith(StackResource r, ObjectNode resourceProperties, String region) {
-        String serviceToken = r.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
-        if (serviceToken == null || serviceToken.isBlank()) {
-            LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
-            return;
-        }
-        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
-        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
-                accountFromArn(serviceToken), "");
         try {
-            JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
-                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region, stackId);
-            if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
+            JsonNode response = sendDelete(r, r.getPhysicalId(), resourceProperties, region);
+            if (response != null && !"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
                 LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
                         r.getLogicalId(), response.path("Reason").asText("(no reason given)"));
             }
         } catch (Exception e) {
-            // Best-effort, consistent with the rest of the delete path.
             LOG.debugv("Custom resource {0} Delete invocation failed: {1}", r.getLogicalId(), e.getMessage());
         }
+    }
+
+    /** The handler's answer to a Delete of {@code physicalId}, or null where no ServiceToken was stored. */
+    private JsonNode sendDelete(StackResource r, String physicalId, ObjectNode resourceProperties, String region) {
+        String serviceToken = r.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
+        if (serviceToken == null || serviceToken.isBlank()) {
+            LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
+            return null;
+        }
+        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
+        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
+                accountFromArn(serviceToken), "");
+        return invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
+                r.getResourceType(), physicalId, resourceProperties, null, region, stackId);
     }
 
     @Override
