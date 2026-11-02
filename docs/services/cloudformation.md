@@ -843,6 +843,10 @@ Template `Conditions` are evaluated before provisioning. A resource whose `Condi
 `Ref` / `Fn::GetAtt` are not required to resolve. This matches CloudFormation and is required for the
 condition-heavy templates CDK and LZA emit.
 
+A condition may name another with `{"Condition": "<name>"}` inside `Fn::And`, `Fn::Or` or `Fn::Not`,
+declared before or after it, as CloudFormation takes it: each condition is evaluated when first named,
+whatever its place in the section. A name the section does not declare reads false.
+
 The operands of `Fn::Equals` are resolved as resource property values are, so `Ref` to a parameter
 or a pseudo parameter (`AWS::StackName` and `AWS::StackId` included) and `Fn::FindInMap`, the
 functions CloudFormation supports there, work inside a condition. The dependency check a create runs

@@ -60,6 +60,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -3800,11 +3801,38 @@ public class CloudFormationService implements ResourceProvider {
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, stackName, stackId, conditionParams, Map.of(), Map.of(),
                 conditions, mappings, objectMapper, name -> "");
-        // Two-pass: collect all names first, then evaluate (handles forward references)
-        condNode.fields().forEachRemaining(e -> conditions.put(e.getKey(), false));
-        condNode.fields().forEachRemaining(e ->
-                conditions.put(e.getKey(), evaluateCondition(e.getValue(), conditions, engine)));
+        // A condition may name any other, declared before or after it (CloudFormation User Guide,
+        // CloudFormation template Conditions syntax, Reference conditions in other conditions), so
+        // each is evaluated when first asked for, the ones it names before it.
+        Map<String, JsonNode> declared = new LinkedHashMap<>();
+        condNode.fields().forEachRemaining(e -> declared.put(e.getKey(), e.getValue()));
+        Set<String> evaluating = new HashSet<>();
+        for (String name : declared.keySet()) {
+            conditionNamed(name, declared, conditions, evaluating, engine);
+        }
         return conditions;
+    }
+
+    /**
+     * The named condition's value, evaluated once and kept in {@code conditions}. A name the section
+     * does not declare reads false, as does a condition reached again while it is being evaluated,
+     * a cycle no template can rely on.
+     */
+    private boolean conditionNamed(String name, Map<String, JsonNode> declared, Map<String, Boolean> conditions,
+                                   Set<String> evaluating, CloudFormationTemplateEngine engine) {
+        Boolean known = conditions.get(name);
+        if (known != null) {
+            return known;
+        }
+        JsonNode expr = declared.get(name);
+        if (expr == null || !evaluating.add(name)) {
+            return false;
+        }
+        boolean value = evaluateCondition(expr,
+                referenced -> conditionNamed(referenced, declared, conditions, evaluating, engine), engine);
+        evaluating.remove(name);
+        conditions.put(name, value);
+        return value;
     }
 
     private static final String NON_STRING_CONDITION_REFERENCE =
@@ -3935,7 +3963,7 @@ public class CloudFormationService implements ResourceProvider {
         topologicalSort(resources, conditions);
     }
 
-    private boolean evaluateCondition(JsonNode expr, Map<String, Boolean> conditions,
+    private boolean evaluateCondition(JsonNode expr, Predicate<String> named,
                                       CloudFormationTemplateEngine engine) {
         if (expr == null || expr.isNull()) {
             return false;
@@ -3945,7 +3973,7 @@ public class CloudFormationService implements ResourceProvider {
         }
         if (expr.isObject()) {
             if (expr.has("Condition")) {
-                return conditions.getOrDefault(expr.get("Condition").asText(), false);
+                return named.test(expr.get("Condition").asText());
             }
             if (expr.has("Fn::Equals")) {
                 JsonNode args = expr.get("Fn::Equals");
@@ -3956,12 +3984,12 @@ public class CloudFormationService implements ResourceProvider {
             if (expr.has("Fn::Not")) {
                 JsonNode args = expr.get("Fn::Not");
                 if (args.isArray() && !args.isEmpty()) {
-                    return !evaluateCondition(args.get(0), conditions, engine);
+                    return !evaluateCondition(args.get(0), named, engine);
                 }
             }
             if (expr.has("Fn::And")) {
                 for (JsonNode item : expr.get("Fn::And")) {
-                    if (!evaluateCondition(item, conditions, engine)) {
+                    if (!evaluateCondition(item, named, engine)) {
                         return false;
                     }
                 }
@@ -3969,7 +3997,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             if (expr.has("Fn::Or")) {
                 for (JsonNode item : expr.get("Fn::Or")) {
-                    if (evaluateCondition(item, conditions, engine)) {
+                    if (evaluateCondition(item, named, engine)) {
                         return true;
                     }
                 }
