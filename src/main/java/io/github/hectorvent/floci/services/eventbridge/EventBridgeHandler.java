@@ -73,6 +73,7 @@ public class EventBridgeHandler {
                 case "PutTargets" -> handlePutTargets(request, region);
                 case "RemoveTargets" -> handleRemoveTargets(request, region);
                 case "ListTargetsByRule" -> handleListTargetsByRule(request, region);
+                case "ListRuleNamesByTarget" -> handleListRuleNamesByTarget(request, region);
                 case "PutEvents" -> handlePutEvents(request, region);
                 case "TestEventPattern" -> handleTestEventPattern(request);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -322,6 +323,22 @@ public class EventBridgeHandler {
         response.put("FailedEntryCount", result.failedCount());
         response.putArray("SuccessfulEntries");
         response.putArray("FailedEntries");
+        return Response.ok(response).build();
+    }
+
+    private Response handleListRuleNamesByTarget(JsonNode request, String region) {
+        String targetArn = request.path("TargetArn").asText(null);
+        String busName = request.path("EventBusName").asText(null);
+        Integer limit = readLimit(request.path("Limit"));
+        String nextToken = request.path("NextToken").asText(null);
+        PaginatedResult<String> page = eventBridgeService.listRuleNamesByTarget(targetArn, busName, limit,
+                nextToken, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode names = response.putArray("RuleNames");
+        page.items().forEach(names::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
