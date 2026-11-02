@@ -375,7 +375,7 @@ public class LambdaExecutorService implements Resettable {
         }
         long deadlineMs = System.currentTimeMillis() + (long) fn.getTimeout() * 1000;
         PendingInvocation invocation = new PendingInvocation(
-                requestId, payload, deadlineMs, fn.getFunctionArn(),
+                requestId, payload, deadlineMs, invokedFunctionArn(fn, invokedQualifier),
                 new CompletableFuture<>());
         invocation.setClientContext(clientContext);
         RuntimeApiServer runtimeApiServer = handle.getRuntimeApiServer();
@@ -416,6 +416,22 @@ public class LambdaExecutorService implements Resettable {
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(cause.getMessage(), "InvocationError"), null, requestId);
         }
+    }
+
+    /**
+     * The ARN the handler is told it was invoked through, as Lambda's runtime API hands it in
+     * {@code Lambda-Runtime-Invoked-Function-Arn}: the function's unqualified ARN with the version or
+     * alias the caller named, or the unqualified ARN when the caller named none. An alias stays the
+     * alias, not the version it resolved to, so the base is rebuilt from the name rather than taken
+     * from a version's own ARN, which already ends in its number.
+     */
+    static String invokedFunctionArn(LambdaFunction fn, String invokedQualifier) {
+        if (invokedQualifier == null || invokedQualifier.isBlank()) {
+            return fn.getFunctionArn();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
+        return new AwsArnUtils.Arn(arn.partition(), "lambda", arn.region(), arn.accountId(),
+                "function:" + fn.getFunctionName() + ":" + invokedQualifier).toString();
     }
 
     /**
