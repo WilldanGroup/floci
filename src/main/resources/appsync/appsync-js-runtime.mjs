@@ -204,7 +204,9 @@ export const util = {
     toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL')
   },
   str: {
-    normalize: (v) => String(v).normalize(),
+    normalize: (v, form) => String(v).normalize(
+      form === undefined ? 'NFC' : String(form).toUpperCase()
+    ),
     toUpper: (v) => String(v).toUpperCase(),
     toLower: (v) => String(v).toLowerCase()
   }
