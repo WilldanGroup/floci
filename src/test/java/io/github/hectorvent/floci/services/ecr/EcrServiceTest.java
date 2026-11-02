@@ -1330,6 +1330,39 @@ class EcrServiceTest {
     }
 
     @Test
+    void deleteRepositoryStartsTheRegistryARestartLeftDownBeforeReadingIt() throws Exception {
+        // Floci restarted on its persisted repositories with the registry container gone: the
+        // registry answers only once the manager starts it again, as the image operations do.
+        String repositoryName = "probe/registry-down-after-restart";
+        AtomicBoolean registryUp = new AtomicBoolean(false);
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(registryManager.tryEnsureStarted()).thenAnswer(inv -> {
+            registryUp.set(true);
+            return true;
+        });
+        when(http.catalogStrict()).thenAnswer(inv -> {
+            if (!registryUp.get()) {
+                throw new ConnectException("Connection refused");
+            }
+            return List.of();
+        });
+        when(http.listTagsStrict(anyString())).thenAnswer(inv -> {
+            if (!registryUp.get()) {
+                throw new ConnectException("Connection refused");
+            }
+            return List.of();
+        });
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+        registryUp.set(false);
+
+        service.deleteRepository(repositoryName, null, false, REGION);
+
+        assertThrows(AwsException.class,
+                () -> service.describeRepositories(List.of(repositoryName), null, REGION));
+    }
+
+    @Test
     void putImage_retagKeepsTheFirstPushTime() {
         InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
         EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,

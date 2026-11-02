@@ -642,6 +642,10 @@ public class EcrService implements ResourceProvider {
             tags = List.of();
             registryAvailable = false;
         } else try {
+            // Start the registry where a stop left it down, as the image operations do, so a
+            // repository is deleted after Floci or its registry restarted. One that still cannot be
+            // reached fails the listing below and aborts the delete.
+            registryManager.tryEnsureStarted();
             tags = listTagsOrThrow(account, region, repositoryName);
         } catch (Exception e) {
             if (isRegistryUnreachable(e)) {
