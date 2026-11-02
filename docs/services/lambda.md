@@ -997,6 +997,11 @@ function's output: `START RequestId: <id> Version: <version>`, then `END Request
 or `Init Duration`, which Floci does not measure, and a function under `LogFormat=JSON` gets
 neither these lines nor Lambda's `platform.*` events.
 
+A synchronous `Invoke` with `LogType=Tail` is answered the last 4 KB of the invocation's log,
+base64-encoded, in `X-Amz-Log-Result`: the function's own output with Lambda's lines around it.
+The output reaches Floci from the container's log stream, which can trail the response, so the
+answer waits until the stream has been quiet for 50 ms, 500 ms at most.
+
 The execution environment gets `AWS_LAMBDA_LOG_FORMAT` from `LogFormat` and, under `LogFormat=JSON`,
 `AWS_LAMBDA_LOG_LEVEL` from `ApplicationLogLevel` (`INFO` when unset, the level the API reports).
 The runtime interface clients read both: a Python function writes each record as a JSON object,

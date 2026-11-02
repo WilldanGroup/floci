@@ -268,8 +268,14 @@ public class LambdaController {
                 ? decodeClientContext(headers.getHeaderString("X-Amz-Client-Context")) : null;
         String durableExecutionName = headers.getHeaderString("X-Amz-Durable-Execution-Name");
 
-        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
-                durableExecutionName);
+        // Tail applies to a synchronous invocation alone (Invoke, LogType).
+        boolean tailLog = type == InvocationType.RequestResponse
+                && "Tail".equals(headers.getHeaderString("X-Amz-Log-Type"));
+        InvokeResult result = tailLog
+                ? lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
+                        durableExecutionName, true)
+                : lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
+                        durableExecutionName);
 
         if (type != InvocationType.Event
                 && result.getPayload() != null

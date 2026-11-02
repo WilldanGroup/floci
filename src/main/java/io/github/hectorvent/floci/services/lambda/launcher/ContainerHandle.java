@@ -22,6 +22,7 @@ public class ContainerHandle {
     private volatile long lastUsedMs;
     private Closeable logStream;
     private volatile Consumer<String> platformLog = line -> { };
+    private volatile Consumer<String> outputTap = line -> { };
 
     public ContainerHandle(String containerId, String functionName,
                            RuntimeApiServer runtimeApiServer, ContainerState state) {
@@ -65,6 +66,10 @@ public class ContainerHandle {
     /** Writes a line of Lambda's own, a START, END or REPORT, to the log stream the function's output goes to. */
     public void platformLog(String line) { platformLog.accept(line); }
     public void setPlatformLog(Consumer<String> platformLog) { this.platformLog = platformLog; }
+
+    /** A line of the function's own output, handed to whatever the invocation in flight collects it into. */
+    public void output(String line) { outputTap.accept(line); }
+    public void setOutputTap(Consumer<String> outputTap) { this.outputTap = outputTap; }
 
     /**
      * True once an extension in this container reported an init or exit error. Real AWS treats

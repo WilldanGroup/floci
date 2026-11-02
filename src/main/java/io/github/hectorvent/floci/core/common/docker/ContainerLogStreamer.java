@@ -92,7 +92,14 @@ public class ContainerLogStreamer {
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, line -> { });
+    }
+
+    /** Like {@link #attachForAccount}, also handing {@code tap} each line it forwards. */
+    public Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix, Consumer<String> tap) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, tap);
     }
 
     /**
@@ -101,20 +108,22 @@ public class ContainerLogStreamer {
     public Closeable attachFromNowForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now(),
+                line -> { });
     }
 
     /** {@code since} of null follows the container's complete log history. */
     Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
-            String region, String logPrefix, Instant since) {
+            String region, String logPrefix, Instant since, Consumer<String> tap) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
-        // Fan each reassembled line that is not blank out to the console logger and CloudWatch Logs.
+        // Fan each reassembled line that is not blank out to the console logger, CloudWatch Logs and the tap.
         Consumer<String> emitter = line -> {
             String logged = logToConsole(logPrefix, line);
             if (logged != null) {
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+                tap.accept(logged);
             }
         };
         return follow(containerId, since, emitter);

@@ -992,7 +992,7 @@ class ContainerLauncherTest {
                 eq("000000000000"), eq("/shared/app-logs"), eq(stream), eq("us-east-1"));
         verify(logStreamer).attachForAccount(
                 eq("000000000000"), eq("container-123"), eq("/shared/app-logs"), eq(stream),
-                eq("us-east-1"), eq("lambda:custom-logs-fn"));
+                eq("us-east-1"), eq("lambda:custom-logs-fn"), any());
     }
 
     @Test
@@ -1052,7 +1052,7 @@ class ContainerLauncherTest {
         assertTrue(env.contains("AWS_REGION=eu-west-2"));
         verify(logStreamer).attachForAccount(
                 eq("000000000000"), eq("container-123"), any(), any(),
-                eq("eu-west-2"), eq("lambda:region-arn-fn"));
+                eq("eu-west-2"), eq("lambda:region-arn-fn"), any());
     }
 
     @Test

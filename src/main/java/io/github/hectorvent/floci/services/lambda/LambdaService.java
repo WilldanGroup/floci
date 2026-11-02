@@ -1381,6 +1381,13 @@ public class LambdaService implements ResourceProvider {
      */
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type, String clientContext, String durableExecutionName) {
+        return invoke(region, functionName, queryQualifier, payload, type, clientContext, durableExecutionName, false);
+    }
+
+    /** As above; {@code tailLog} answers a synchronous invocation's log tail, as Invoke's {@code LogType=Tail} asks. */
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type, String clientContext, String durableExecutionName,
+                               boolean tailLog) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1398,8 +1405,11 @@ public class LambdaService implements ResourceProvider {
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        InvokeResult result = tailLog
+                ? executorService.invoke(fn, payload, type, LambdaInvocationChain.currentDepth(), qualifier,
+                        clientContext, true)
+                : executorService.invoke(fn, payload, type, LambdaInvocationChain.currentDepth(), qualifier,
+                        clientContext);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }

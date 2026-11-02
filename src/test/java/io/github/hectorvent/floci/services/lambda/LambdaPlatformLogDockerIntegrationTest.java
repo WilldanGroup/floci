@@ -89,6 +89,46 @@ class LambdaPlatformLogDockerIntegrationTest {
         }
     }
 
+    @Test
+    void anInvokeAskingForItsLogTailIsAnsweredTheFunctionsLineBetweenLambdasLines() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String functionName = "log-tail-" + suffix;
+        given()
+                .contentType("application/json")
+                .body("""
+                    {
+                      "FunctionName": "%s",
+                      "Runtime": "nodejs20.x",
+                      "Role": "%s",
+                      "Handler": "index.handler",
+                      "Timeout": 10,
+                      "Code": {"ZipFile": "%s"}
+                    }
+                    """.formatted(functionName, ROLE, zipBase64(
+                        "exports.handler = async () => { console.log('probe-line'); return { ok: true }; };\n")))
+        .when()
+                .post(BASE_PATH + "/functions")
+        .then()
+                .statusCode(201);
+        try {
+            String tail = given()
+                    .header("X-Amz-Log-Type", "Tail")
+                    .body("{}")
+            .when()
+                    .post(BASE_PATH + "/functions/" + functionName + "/invocations")
+            .then()
+                    .statusCode(200)
+                    .extract().header("X-Amz-Log-Result");
+            String log = new String(Base64.getDecoder().decode(tail), StandardCharsets.UTF_8);
+            assertTrue(log.startsWith("START RequestId: "), log);
+            assertTrue(log.contains("probe-line"), log);
+            assertTrue(log.contains("\nEND RequestId: "), log);
+            assertTrue(log.contains("\nREPORT RequestId: "), log);
+        } finally {
+            given().when().delete(BASE_PATH + "/functions/" + functionName);
+        }
+    }
+
     private static List<String> awaitMessages(String logGroup, int count) throws InterruptedException {
         List<String> messages = List.of();
         for (int attempt = 0; attempt < 100 && messages.size() < count; attempt++) {
@@ -115,10 +155,14 @@ class LambdaPlatformLogDockerIntegrationTest {
     }
 
     private static String silentZipBase64() throws Exception {
+        return zipBase64("exports.handler = async () => ({ ok: true });\n");
+    }
+
+    private static String zipBase64(String source) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
             zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => ({ ok: true });\n".getBytes(StandardCharsets.UTF_8));
+            zip.write(source.getBytes(StandardCharsets.UTF_8));
             zip.closeEntry();
         }
         return Base64.getEncoder().encodeToString(bytes.toByteArray());
