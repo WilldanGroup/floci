@@ -265,6 +265,31 @@ class AppSyncExecutionIntegrationTest {
             .body("data.hello", nullValue());
     }
 
+    /** A nullable variable given as null is kept as null, so the request is answered and not failed. */
+    @Test
+    void aVariableGivenAsNullIsAnswered() {
+        String nullApi = createApi("null-var-" + UUID.randomUUID().toString().substring(0, 8));
+        String nullKey = createApiKey(nullApi);
+        startSchema(nullApi, "type Query { hello(nextToken: String): String }");
+        awaitSchemaSuccess(nullApi);
+
+        given()
+            .header("x-api-key", nullKey)
+            .contentType("application/json")
+            .body("""
+                {
+                  "query": "query First($nextToken: String) { hello(nextToken: $nextToken) }",
+                  "variables": {"nextToken": null}
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + nullApi + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("data.hello", nullValue())
+            .body("errors", nullValue());
+    }
+
     @Test
     void httpSubscriptionReturns200OperationNotSupported() {
         String subApi = createApi("sub-" + UUID.randomUUID().toString().substring(0, 8));

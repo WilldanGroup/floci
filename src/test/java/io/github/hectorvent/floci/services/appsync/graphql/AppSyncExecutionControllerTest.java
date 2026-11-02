@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
@@ -178,6 +179,29 @@ class AppSyncExecutionControllerTest {
         ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
         verify(authMiddleware).authenticate(any(), any(), info.capture());
         assertEquals("cn-north-1", info.getValue().region());
+    }
+
+    /**
+     * A nullable variable given as null is kept as null (GraphQL, October 2021, 6.1.2 Coercing
+     * Variable Values), as a client asking for a first page sends {@code "nextToken": null}. Copied
+     * strictly, it failed the request with InternalFailure before it was authenticated.
+     */
+    @Test
+    void aVariableGivenAsNullReachesTheAuthorizerAsNull() {
+        GraphqlApi api = new GraphqlApi();
+        api.setApiId("api-1");
+        when(appSyncService.getGraphqlApi("api-1")).thenReturn(api);
+        when(authMiddleware.authenticate(any(), any(), any())).thenThrow(AppSyncAuth.unauthorized());
+
+        Response response = controller.execute("api-1", jsonHeaders,
+                "{\"query\":\"query Q($nextToken: String) { hello }\",\"variables\":{\"nextToken\":null,\"app\":\"a\"}}");
+
+        assertEquals(401, response.getStatus());
+        ArgumentCaptor<AuthRequestInfo> info = ArgumentCaptor.forClass(AuthRequestInfo.class);
+        verify(authMiddleware).authenticate(any(), any(), info.capture());
+        assertTrue(info.getValue().variables().containsKey("nextToken"));
+        assertNull(info.getValue().variables().get("nextToken"));
+        assertEquals("a", info.getValue().variables().get("app"));
     }
 
     @Test
