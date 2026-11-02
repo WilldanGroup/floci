@@ -420,6 +420,17 @@ The CDK then deletes that change set, and before its next deploy deletes it agai
 status, named with its stack or by its ARN alone; a `StackName` that names no stack is still a
 `ValidationError`.
 
+## Change Sets for Nested Stacks
+
+A change set created with `IncludeNestedStacks` plans a change set on each nested stack it modifies, and on theirs
+in turn, as the CloudFormation User Guide's "Change sets for nested stacks" describes: the parent's change to the
+nested stack carries the nested change set's ARN as its `ChangeSetId`, and the nested change set holds the nested
+stack's own changes, from its new template and the parameters the parent's new template hands it resolved against
+what stands, with `ParentChangeSetId`, `RootChangeSetId` and `IncludeNestedStacks` set. A nested change set is
+`UNAVAILABLE`, "Executable from root change set": executing the root applies the whole hierarchy and removes the
+nested change sets, and deleting the root deletes them. A nested stack the change set adds or removes gets no change
+set of its own yet, and each change's `Scope` and `Details` are left empty.
+
 ## Lambda Stack Updates
 
 `AWS::Lambda::Function` resources are reconciled during `UpdateStack` in the same shape as CloudFormation/CDK deployments:

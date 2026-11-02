@@ -269,6 +269,9 @@ public class CloudFormationQueryHandler {
                         parameters, capabilities, tags, region)
                 : cfnService.createChangeSetForRequest(stackName, changeSetName, changeSetType,
                         templateBody, templateUrl, parameters, capabilities, tags, region);
+        if (Boolean.parseBoolean(params.getFirst("IncludeNestedStacks"))) {
+            cfnService.planNestedChangeSets(cs, region);
+        }
 
         String xml = new XmlBuilder()
                 .start("CreateChangeSetResponse", CF_NS)
@@ -300,6 +303,9 @@ public class CloudFormationQueryHandler {
                     .elem("Status", cs.getStatus())
                     .elem("ExecutionStatus", cs.getExecutionStatus())
                     .elem("StatusReason", cs.getStatusReason())
+                    .elem("IncludeNestedStacks", String.valueOf(cs.isIncludeNestedStacks()))
+                    .elem("ParentChangeSetId", cs.getParentChangeSetId())
+                    .elem("RootChangeSetId", cs.getRootChangeSetId())
                     .start("Changes");
             for (CloudFormationService.ResourceChange change : changes) {
                 xml.start("member")
@@ -310,6 +316,7 @@ public class CloudFormationQueryHandler {
                    .elem("PhysicalResourceId", change.physicalResourceId())
                    .elem("ResourceType", change.resourceType())
                    .elem("Replacement", change.replacement())
+                   .elem("ChangeSetId", cs.getNestedChangeSetIds().get(change.logicalResourceId()))
                    .raw("<Scope/><Details/>")
                    .end("ResourceChange")
                    .end("member");

@@ -1172,8 +1172,14 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
      */
     public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region,
                                                 String clientRequestToken) {
-        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), true,
+        String accountId = regionResolver.getAccountId();
+        ChangeSet planned = getChangeSetOrThrow(getStackForChangeSet(stackName, changeSetName, region, accountId),
+                changeSetName, region, accountId);
+        Future<?> execution = claimAndSubmitExecution(stackName, changeSetName, region, accountId, true,
                 clientRequestToken);
+        // The root's execution applies the whole hierarchy, and the nested change sets go with it.
+        removeNestedChangeSets(planned, region, accountId);
+        return execution;
     }
 
     /**
@@ -1316,6 +1322,8 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
             // that had nothing to change.
             return;
         }
+        // Deleting a root change set deletes the whole hierarchy of change sets it planned.
+        removeNestedChangeSets(cs, region, accountId);
         stack.getChangeSets().remove(cs.getChangeSetName());
         persistStack(stack);
     }
@@ -2394,6 +2402,149 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
         return changedResourceIds;
     }
 
+
+    /**
+     * The parameters a nested stack resource's {@code Parameters} hands its stack, resolved as a property value:
+     * Parameters may be an Fn::If choosing between whole maps, and a value that is AWS::NoValue passes nothing, so
+     * the child's Default applies. A list, such as an Fn::GetAZs resolves to, is passed joined with commas, and a
+     * null as an empty string.
+     */
+    private static Map<String, String> nestedStackParameters(JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, String> childParams = new LinkedHashMap<>();
+        JsonNode parameters = props == null ? null : engine.resolveNodeOmittingNoValue(props.get("Parameters"));
+        if (parameters != null && parameters.isObject()) {
+            parameters.fields().forEachRemaining(e -> {
+                JsonNode value = e.getValue();
+                if (value.isArray()) {
+                    List<String> items = new ArrayList<>();
+                    value.forEach(item -> items.add(item.asText()));
+                    childParams.put(e.getKey(), String.join(",", items));
+                } else {
+                    childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
+                }
+            });
+        }
+        return childParams;
+    }
+
+    /**
+     * Plans the change sets of the nested stacks a change set created with {@code IncludeNestedStacks} modifies, as
+     * CloudFormation does (CloudFormation User Guide, Change sets for nested stacks): one on each nested stack the
+     * change set modifies, from that stack's new template and the parameters the parent's new template hands it,
+     * resolved against what stands, with the change set above it as its parent and the root as its root, executable
+     * only from the root; and so on down the hierarchy. A nested stack the change set adds or removes gets none. One
+     * that cannot be planned fails the change set above it, naming the nested stack and why.
+     */
+    public void planNestedChangeSets(ChangeSet root, String region) {
+        root.setIncludeNestedStacks(true);
+        String accountId = currentAccount();
+        Stack stack = resolveStack(root.getStackName(), region, accountId);
+        if (stack == null) {
+            return;
+        }
+        if (!"FAILED".equals(root.getStatus())) {
+            planNested(stack, root, root.getChangeSetId(), region, accountId);
+        }
+        persistStack(stack);
+    }
+
+    private void planNested(Stack stack, ChangeSet parent, String rootChangeSetId, String region, String accountId) {
+        JsonNode template;
+        try {
+            template = parseTemplate(parent.getTemplateBody());
+        } catch (Exception e) {
+            return;
+        }
+        CloudFormationTemplateEngine engine = null;
+        for (ResourceChange change : computeChangeSetChanges(parent, region)) {
+            if (!"AWS::CloudFormation::Stack".equals(change.resourceType()) || !"Modify".equals(change.action())) {
+                continue;
+            }
+            StackResource standing = stack.getResources().get(change.logicalResourceId());
+            Stack child = standing == null || standing.getPhysicalId() == null ? null
+                    : resolveStack(standing.getPhysicalId(), region, accountId);
+            if (child == null) {
+                continue;
+            }
+            try {
+                if (engine == null) {
+                    engine = planningEngine(stack, template, parent.getParameters(), region, accountId);
+                }
+                JsonNode props = template.path("Resources").path(change.logicalResourceId()).path("Properties");
+                ChangeSet nested = createChangeSet(child.getStackName(),
+                        nestedChangeSetName(parent.getChangeSetName(), change.logicalResourceId()), "UPDATE", null,
+                        engine.resolve(props.path("TemplateURL")), nestedStackParameters(props, engine),
+                        parent.getCapabilities(), null, region, accountId, false, false);
+                nested.setIncludeNestedStacks(true);
+                nested.setParentChangeSetId(parent.getChangeSetId());
+                nested.setRootChangeSetId(rootChangeSetId);
+                nested.setStatus("CREATE_COMPLETE");
+                nested.setExecutionStatus("UNAVAILABLE");
+                nested.setStatusReason("Executable from root change set");
+                parent.getNestedChangeSetIds().put(change.logicalResourceId(), nested.getChangeSetId());
+                planNested(child, nested, rootChangeSetId, region, accountId);
+                persistStack(child);
+            } catch (RuntimeException e) {
+                parent.setStatus("FAILED");
+                parent.setExecutionStatus("UNAVAILABLE");
+                parent.setStatusReason("Nested change set for " + change.logicalResourceId() + " could not be created: "
+                        + e.getMessage());
+                return;
+            }
+        }
+    }
+
+    /** A nested change set's name: its parent's and the nested stack's logical ID, within a name's 128 characters. */
+    private static String nestedChangeSetName(String parentName, String logicalId) {
+        String name = parentName + "-" + logicalId;
+        return name.length() <= 128 ? name : name.substring(0, 128);
+    }
+
+    /**
+     * An engine resolving the stack's new {@code template} against what stands, as a change set's plan reads it: the
+     * given parameters with their defaults, and the standing resources' physical IDs and attributes.
+     */
+    private CloudFormationTemplateEngine planningEngine(Stack stack, JsonNode template, Map<String, String> given,
+                                                        String region, String accountId) {
+        Map<String, String> params = resolveSsmParameters(template,
+                resolveDefaultParameters(template, given == null ? Map.of() : given), region);
+        Map<String, Boolean> conditions = resolveConditions(template, params, stack, region, accountId);
+        Map<String, JsonNode> mappings = new HashMap<>();
+        template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        Map<String, String> physicalIds = new LinkedHashMap<>();
+        Map<String, Map<String, String>> resourceAttrs = new LinkedHashMap<>();
+        for (StackResource r : stack.resourcesSnapshot().values()) {
+            if (r.getPhysicalId() != null) {
+                physicalIds.put(r.getLogicalId(), r.getPhysicalId());
+                resourceAttrs.put(r.getLogicalId(), r.getAttributes());
+            }
+        }
+        JsonNode resources = template.path("Resources");
+        return new CloudFormationTemplateEngine(
+                accountId, region, stack.getStackName(), stack.getStackId(), params, physicalIds, resourceAttrs,
+                conditions, mappings, objectMapper,
+                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                value -> dynamicReferences.resolveDynamicReferences(value, region, false),
+                (name, output, outputRegion, roleArn) ->
+                        resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                parameterTypes(template),
+                (id, attribute, value) -> dispatcher.attributeValue(
+                        resources.path(id).path("Type").asText(), attribute, value));
+    }
+
+    /** Removes from their stacks the nested change sets {@code changeSet} planned, and those below them. */
+    private void removeNestedChangeSets(ChangeSet changeSet, String region, String accountId) {
+        for (String nestedId : changeSet.getNestedChangeSetIds().values()) {
+            Stack child = findStackForChangeSetArn(nestedId, region, accountId);
+            ChangeSet nested = child == null ? null : findChangeSet(child, nestedId, region, accountId);
+            if (nested == null) {
+                continue;
+            }
+            removeNestedChangeSets(nested, region, accountId);
+            child.getChangeSets().remove(nested.getChangeSetName());
+            persistStack(child);
+        }
+    }
 
     private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
                                          String region, String accountId) {
@@ -4250,24 +4401,7 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
         String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
-        // Resolved as a property value: Parameters may be an Fn::If choosing between whole maps,
-        // and a value that is AWS::NoValue passes nothing, so the child's Default applies. A list,
-        // such as an Fn::GetAZs resolves to, is passed joined with commas, and a null as an empty
-        // string, as before.
-        Map<String, String> childParams = new LinkedHashMap<>();
-        JsonNode parameters = props == null ? null : engine.resolveNodeOmittingNoValue(props.get("Parameters"));
-        if (parameters != null && parameters.isObject()) {
-            parameters.fields().forEachRemaining(e -> {
-                JsonNode value = e.getValue();
-                if (value.isArray()) {
-                    List<String> items = new ArrayList<>();
-                    value.forEach(item -> items.add(item.asText()));
-                    childParams.put(e.getKey(), String.join(",", items));
-                } else {
-                    childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
-                }
-            });
-        }
+        Map<String, String> childParams = nestedStackParameters(props, engine);
         // CloudFormation creates or updates the child with these values, so the call fails as a
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
         // without a value, or a Fn::GetStackOutput where the child's template may not hold one
