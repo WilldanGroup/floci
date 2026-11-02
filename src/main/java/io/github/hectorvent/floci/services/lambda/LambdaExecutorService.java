@@ -23,6 +23,7 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -382,6 +383,17 @@ public class LambdaExecutorService implements Resettable {
         boolean initializing = !runtimeApiServer.hasRuntimePolled();
         long dispatchWaitMs = dispatchWaitMs(fn.getTimeout(), initializing,
                 runtimeApiServer.getContainerStartedAtMs(), System.currentTimeMillis());
+        // Lambda's START, END and REPORT lines, in the Text log format's form; a function on the JSON
+        // format gets Lambda's platform events instead, which Floci does not write yet.
+        ContainerHandle invoked = "JSON".equals(fn.getLogFormat()) ? null : handle;
+        AtomicLong dispatchedAtNanos = new AtomicLong();
+        invocation.getDispatchedFuture().thenRun(() -> {
+            dispatchedAtNanos.set(System.nanoTime());
+            if (invoked != null) {
+                invoked.platformLog("START RequestId: " + requestId + " Version: "
+                        + (fn.getVersion() != null ? fn.getVersion() : "$LATEST"));
+            }
+        });
         try {
             runtimeApiServer.enqueue(invocation);
 
@@ -390,6 +402,7 @@ public class LambdaExecutorService implements Resettable {
                     .get(dispatchWaitMs, TimeUnit.MILLISECONDS);
             InvokeResult result = invocation.getResultFuture().get();
 
+            endAndReport(invoked, fn, requestId, dispatchedAtNanos.get(), null);
             warmPool.release(handle);
             return result;
 
@@ -406,6 +419,7 @@ public class LambdaExecutorService implements Resettable {
                 } else {
                     LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
                 }
+                endAndReport(invoked, fn, requestId, dispatchedAtNanos.get(), "timeout");
                 warmPool.destroyHandle(handle);
                 return new InvokeResult(200, "Unhandled",
                         buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
@@ -416,6 +430,28 @@ public class LambdaExecutorService implements Resettable {
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(cause.getMessage(), "InvocationError"), null, requestId);
         }
+    }
+
+    /**
+     * Lambda's END and REPORT lines for an invocation its runtime took, as Lambda writes them to the
+     * function's log stream after the function's own output: the REPORT carries the invocation's
+     * duration, its billed duration rounded up to the millisecond, and the function's memory, and a
+     * status where the invocation timed out. Floci measures no memory used and no init duration, so
+     * the REPORT names neither. An invocation the runtime never took, or a function on the JSON log
+     * format, which {@code handle} is null for, writes neither line.
+     */
+    static void endAndReport(ContainerHandle handle, LambdaFunction fn, String requestId, long dispatchedAtNanos,
+                             String status) {
+        if (handle == null || dispatchedAtNanos == 0) {
+            return;
+        }
+        double durationMs = Math.max(0, System.nanoTime() - dispatchedAtNanos) / 1_000_000.0;
+        handle.platformLog("END RequestId: " + requestId);
+        handle.platformLog("REPORT RequestId: " + requestId
+                + "\tDuration: " + String.format(Locale.ROOT, "%.2f", durationMs) + " ms"
+                + "\tBilled Duration: " + Math.max(1, (long) Math.ceil(durationMs)) + " ms"
+                + "\tMemory Size: " + fn.getMemorySize() + " MB"
+                + (status != null ? "\tStatus: " + status : ""));
     }
 
     /**
