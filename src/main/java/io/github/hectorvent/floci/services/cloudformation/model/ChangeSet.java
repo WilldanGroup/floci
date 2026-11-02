@@ -24,6 +24,11 @@ public class ChangeSet {
     private Map<String, String> tags;
     private String changeSetType; // CREATE or UPDATE
     private Instant creationTime = Instant.now();
+    private boolean includeNestedStacks;
+    private String parentChangeSetId;
+    private String rootChangeSetId;
+    /** The change set planned for each nested stack this one modifies, by the nested stack's logical ID. */
+    private Map<String, String> nestedChangeSetIds = new LinkedHashMap<>();
 
     public String getChangeSetId() { return changeSetId; }
     public void setChangeSetId(String changeSetId) { this.changeSetId = changeSetId; }
@@ -51,4 +56,14 @@ public class ChangeSet {
     public void setChangeSetType(String changeSetType) { this.changeSetType = changeSetType; }
     public Instant getCreationTime() { return creationTime; }
     public void setCreationTime(Instant creationTime) { this.creationTime = creationTime; }
+    public boolean isIncludeNestedStacks() { return includeNestedStacks; }
+    public void setIncludeNestedStacks(boolean includeNestedStacks) { this.includeNestedStacks = includeNestedStacks; }
+    public String getParentChangeSetId() { return parentChangeSetId; }
+    public void setParentChangeSetId(String parentChangeSetId) { this.parentChangeSetId = parentChangeSetId; }
+    public String getRootChangeSetId() { return rootChangeSetId; }
+    public void setRootChangeSetId(String rootChangeSetId) { this.rootChangeSetId = rootChangeSetId; }
+    public Map<String, String> getNestedChangeSetIds() { return nestedChangeSetIds; }
+    public void setNestedChangeSetIds(Map<String, String> nestedChangeSetIds) {
+        this.nestedChangeSetIds = nestedChangeSetIds == null ? new LinkedHashMap<>() : new LinkedHashMap<>(nestedChangeSetIds);
+    }
 }
