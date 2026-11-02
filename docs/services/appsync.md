@@ -141,6 +141,12 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 |---|---|
 | `GetEnhancedMetricsConfig` | Get the enhanced metrics configuration |
 
+### Code evaluation
+
+| Operation | Description |
+|---|---|
+| `EvaluateCode` | Run one handler, `request` (the default) or `response`, of `APPSYNC_JS` code against a context in the Node sidecar resolvers run in, creating nothing. `evaluationResult`, `stash` and `outErrors` come back as JSON text, and an error the handler throws or raises with `util.error` as `error.message`. `logs` is always empty: `util.log` lines are not kept. |
+
 ## Schema Registry
 
 Schema parsing and query execution run in the **GraphQL sidecar** (issue #2917), not in Floci's
