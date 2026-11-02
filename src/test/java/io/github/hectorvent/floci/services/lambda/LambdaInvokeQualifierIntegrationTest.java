@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.github.dockerjava.api.DockerClient;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.hamcrest.Matcher;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -18,10 +21,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Invoke ignored the {@code Qualifier} query parameter, so {@code ?Qualifier=} ran {@code $LATEST}
- * and an alias's asynchronous invocation settings were never applied.
+ * and an alias's asynchronous invocation settings were never applied. A handler was also told the
+ * unqualified ARN whatever was invoked, where Lambda tells it the version or alias the caller named.
  */
 @QuarkusTest
 class LambdaInvokeQualifierIntegrationTest {
+
+    @Inject
+    DockerClient dockerClient;
 
     private static String zipB64(String body) throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -204,5 +211,137 @@ class LambdaInvokeQualifierIntegrationTest {
 
         response.then().statusCode(204);
         assertEquals(response.header("x-amz-request-id"), response.header("x-amzn-RequestId"));
+    }
+
+    @Test
+    void anUnqualifiedInvokeHandsTheHandlerTheUnqualifiedArn() throws Exception {
+        requireDocker();
+        String fn = createFunctionAnsweringItsInvokedArn();
+        try {
+            String functionArn = functionArn(fn);
+
+            given().body("{}")
+            .when().post("/2015-03-31/functions/" + fn + "/invocations")
+            .then().statusCode(200).body("invokedFunctionArn", equalTo(functionArn));
+        } finally {
+            deleteFunction(fn);
+        }
+    }
+
+    @Test
+    void aVersionInvokeHandsTheHandlerTheArnQualifiedByTheVersion() throws Exception {
+        requireDocker();
+        String fn = createFunctionAnsweringItsInvokedArn();
+        try {
+            String functionArn = functionArn(fn);
+            publishVersion(fn, "1");
+
+            given().body("{}")
+            .when().post("/2015-03-31/functions/" + fn + "/invocations?Qualifier=1")
+            .then().statusCode(200).header("X-Amz-Executed-Version", "1")
+                .body("invokedFunctionArn", equalTo(functionArn + ":1"));
+        } finally {
+            deleteFunction(fn);
+        }
+    }
+
+    @Test
+    void anAliasInvokeHandsTheHandlerTheArnQualifiedByTheAliasNotItsVersion() throws Exception {
+        requireDocker();
+        String fn = createFunctionAnsweringItsInvokedArn();
+        try {
+            String functionArn = functionArn(fn);
+            publishVersion(fn, "1");
+            given()
+                .contentType("application/json")
+                .body("{\"Name\": \"live\", \"FunctionVersion\": \"1\"}")
+            .when()
+                .post("/2015-03-31/functions/" + fn + "/aliases")
+            .then()
+                .statusCode(201);
+
+            given().body("{}")
+            .when().post("/2015-03-31/functions/" + fn + "/invocations?Qualifier=live")
+            .then().statusCode(200).header("X-Amz-Executed-Version", "1")
+                .body("invokedFunctionArn", equalTo(functionArn + ":live"));
+
+            given().body("{}")
+            .when().post("/2015-03-31/functions/" + fn + ":live/invocations")
+            .then().statusCode(200).header("X-Amz-Executed-Version", "1")
+                .body("invokedFunctionArn", equalTo(functionArn + ":live"));
+        } finally {
+            deleteFunction(fn);
+        }
+    }
+
+    @Test
+    void anAliasOfLatestHandsTheHandlerTheArnQualifiedByTheAlias() throws Exception {
+        requireDocker();
+        String fn = createFunctionAnsweringItsInvokedArn();
+        try {
+            String functionArn = functionArn(fn);
+            given()
+                .contentType("application/json")
+                .body("{\"Name\": \"head\", \"FunctionVersion\": \"$LATEST\"}")
+            .when()
+                .post("/2015-03-31/functions/" + fn + "/aliases")
+            .then()
+                .statusCode(201);
+
+            given().body("{}")
+            .when().post("/2015-03-31/functions/" + fn + "/invocations?Qualifier=head")
+            .then().statusCode(200).header("X-Amz-Executed-Version", "$LATEST")
+                .body("invokedFunctionArn", equalTo(functionArn + ":head"));
+        } finally {
+            deleteFunction(fn);
+        }
+    }
+
+    private void requireDocker() {
+        Assumptions.assumeTrue(isDockerAvailable(),
+                "Docker daemon must be available to run the function that answers its invoked ARN");
+    }
+
+    private boolean isDockerAvailable() {
+        try {
+            dockerClient.pingCmd().exec();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** A function whose handler answers the ARN its context says it was invoked through. */
+    private static String createFunctionAnsweringItsInvokedArn() throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("handler.py"));
+            zos.write("def handler(e, c):\n    return {'invokedFunctionArn': c.invoked_function_arn}\n"
+                    .getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        String name = "inv-qual-arn-" + Long.toString(System.nanoTime(), 36);
+        given()
+            .contentType("application/json")
+            .body("""
+                {"FunctionName": "%s", "Runtime": "python3.12", "Timeout": 30,
+                 "Role": "arn:aws:iam::000000000000:role/r", "Handler": "handler.handler",
+                 "Code": {"ZipFile": "%s"}}
+                """.formatted(name, Base64.getEncoder().encodeToString(baos.toByteArray())))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(anyOf200Or201());
+        return name;
+    }
+
+    private static String functionArn(String fn) {
+        return given()
+        .when().get("/2015-03-31/functions/" + fn + "/configuration")
+        .then().statusCode(200).extract().path("FunctionArn");
+    }
+
+    private static void deleteFunction(String fn) {
+        given().when().delete("/2015-03-31/functions/" + fn);
     }
 }

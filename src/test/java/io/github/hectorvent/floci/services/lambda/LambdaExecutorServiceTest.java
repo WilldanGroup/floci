@@ -202,6 +202,60 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void theEnqueuedInvocationCarriesTheArnQualifiedAsTheCallerNamedIt() {
+        // The runtime API hands this ARN to the handler and to every extension's INVOKE event. An alias
+        // resolves to a version's snapshot, whose own ARN ends in the version, or to $LATEST's unqualified
+        // record, yet the handler is told the alias.
+        LambdaFunction version = new LambdaFunction();
+        version.setFunctionName("test-fn");
+        version.setVersion("1");
+        version.setFunctionArn(fn.getFunctionArn() + ":1");
+        version.setTimeout(1);
+        List<String> enqueued = answerEveryInvocation();
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null);
+        executor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "1");
+        executor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "live");
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, "head");
+
+        assertEquals(List.of(
+                "arn:aws:lambda:us-east-1:000000000000:function:test-fn",
+                "arn:aws:lambda:us-east-1:000000000000:function:test-fn:1",
+                "arn:aws:lambda:us-east-1:000000000000:function:test-fn:live",
+                "arn:aws:lambda:us-east-1:000000000000:function:test-fn:head"), enqueued);
+    }
+
+    @Test
+    void anEventInvocationThroughAnAliasCarriesTheAliasQualifiedArn() {
+        LambdaFunction version = new LambdaFunction();
+        version.setFunctionName("test-fn");
+        version.setVersion("1");
+        version.setFunctionArn(fn.getFunctionArn() + ":1");
+        version.setTimeout(1);
+        List<String> enqueued = answerEveryInvocation();
+
+        executor.invoke(version, "{}".getBytes(), InvocationType.Event, 0, "live");
+
+        verify(warmPool, timeout(5000)).release(any());
+        assertEquals(List.of("arn:aws:lambda:us-east-1:000000000000:function:test-fn:live"), enqueued);
+    }
+
+    /** Answers every invocation at once, keeping the ARN each was enqueued with. */
+    private List<String> answerEveryInvocation() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-arn", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        List<String> enqueued = new CopyOnWriteArrayList<>();
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            enqueued.add(pi.getFunctionArn());
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, pi.getRequestId()));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        return enqueued;
+    }
+
+    @Test
     void successfulInvocation_releasesHandle_doesNotDestroy() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-2", "test-fn", rtas, ContainerState.WARM);
