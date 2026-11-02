@@ -331,6 +331,9 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Select")) {
                 return resolveNode(selectedElement(node.get("Fn::Select")));
             }
+            if (refersToListParameter(node)) {
+                return objectMapper.valueToTree(listParameterMembers(resolve(node)));
+            }
             if (callsIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
             }
@@ -663,6 +666,9 @@ public class CloudFormationTemplateEngine {
             return resolveListElements(node, resolveDynamicReferences);
         }
         if (node.isObject()) {
+            if (refersToListParameter(node)) {
+                return listParameterMembers(resolveDynamicReferences ? resolve(node) : resolveIntrinsic(node));
+            }
             if (node.has("Fn::GetAtt")) {
                 JsonNode attribute = resolveGetAttNode(node.get("Fn::GetAtt"));
                 if (attribute.isArray()) {
@@ -784,6 +790,28 @@ public class CloudFormationTemplateEngine {
             return yieldsString(selectIfBranch(node.get("Fn::If")));
         }
         return node.has("Fn::Select") || node.has("Fn::Join") || node.has("Fn::Sub") || node.has("Fn::Base64");
+    }
+
+    /**
+     * A list parameter's value as a {@code Ref} to it results in CloudFormation: its members, split at
+     * each comma and each space trimmed (CloudFormation User Guide, CloudFormation template Parameters
+     * syntax: {@code "test,dev,prod"}, "and a {@code Ref} would result in {@code ["test","dev","prod"]}").
+     */
+    private static List<String> listParameterMembers(String value) {
+        List<String> members = new ArrayList<>();
+        for (String member : value.split(",", -1)) {
+            members.add(member.trim());
+        }
+        return members;
+    }
+
+    /** Whether {@code node} is a {@code Ref} to a parameter whose type is a list. */
+    private boolean refersToListParameter(JsonNode node) {
+        if (node.size() != 1 || !node.has("Ref") || parameterTypes == null) {
+            return false;
+        }
+        String type = parameterTypes.get(node.get("Ref").asText());
+        return type != null && isListParameterType(type);
     }
 
     /** The parameter types whose value is a list: CommaDelimitedList, List<...> and their SSM forms. */

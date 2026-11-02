@@ -469,6 +469,29 @@ class CloudFormationTemplateEngineTest {
     // correctly (and drops blank entries, unlike the private resolveList it delegates to); it
     // only needed Fn::If added, which is what these exercise.
 
+    /**
+     * CloudFormation's Parameters syntax page: a Ref to a CommaDelimitedList parameter results in its
+     * members, each space trimmed, and one to a List<...> parameter in a list of strings; a String
+     * parameter holding commas stays one string.
+     */
+    @Test
+    void resolveNodeAnswersAListParametersRefWithItsMembers() {
+        Map<String, String> types = Map.of("Csv", "CommaDelimitedList", "Ports", "List<Number>",
+                "SsmCsv", "AWS::SSM::Parameter::Value<CommaDelimitedList>", "Str", "String", "Empty", "CommaDelimitedList");
+        Map<String, String> values = Map.of("Csv", "test, dev ,prod", "Ports", "80,443", "SsmCsv", "a,b",
+                "Str", "a,b", "Empty", "");
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1",
+                "my-stack", "stack/id", values, Map.of(), Map.of(), Map.of(), Map.of(), mapper,
+                (Function<String, String>) name -> null, null, null, types);
+
+        assertEquals(json("[\"test\", \"dev\", \"prod\"]"), e.resolveNode(json("{\"Ref\": \"Csv\"}")));
+        assertEquals(json("[\"80\", \"443\"]"), e.resolveNode(json("{\"Ref\": \"Ports\"}")));
+        assertEquals(json("[\"a\", \"b\"]"), e.resolveNode(json("{\"Ref\": \"SsmCsv\"}")));
+        assertEquals(json("[\"\"]"), e.resolveNode(json("{\"Ref\": \"Empty\"}")));
+        assertEquals(json("\"a,b\""), e.resolveNode(json("{\"Ref\": \"Str\"}")));
+        assertEquals("test,dev,prod", e.resolve(json("{\"Fn::Join\": [\",\", {\"Ref\": \"Csv\"}]}")));
+    }
+
     @Test
     void resolveStringListSplitsFnSplitWithItsActualDelimiter() {
         assertEquals(List.of("a", "b", "c"),
