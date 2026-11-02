@@ -593,6 +593,26 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return targetStore.get(key).orElse(List.of());
     }
 
+    /**
+     * One page of the names of a bus's rules that have a target whose ARN is {@code targetArn}, in name order, as
+     * ListRuleNamesByTarget answers: the default bus where none is named, and 100 names a page at most.
+     */
+    public PaginatedResult<String> listRuleNamesByTarget(String targetArn, String busName, Integer limit,
+                                                         String nextToken, String region) {
+        if (targetArn == null) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("targetArn"));
+        }
+        String effectiveBus = resolvedBusName(busName);
+        List<String> names = new ArrayList<>();
+        for (Rule rule : listRules(effectiveBus, null, region)) {
+            List<Target> targets = targetStore.get(ruleKey(region, effectiveBus, rule.getName())).orElse(List.of());
+            if (targets.stream().anyMatch(target -> targetArn.equals(target.getArn()))) {
+                names.add(rule.getName());
+            }
+        }
+        return paginate(names, Function.identity(), limit, nextToken, "rule");
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
