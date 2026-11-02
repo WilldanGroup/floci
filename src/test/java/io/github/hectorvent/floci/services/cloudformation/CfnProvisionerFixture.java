@@ -117,6 +117,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.TransferCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.WaitConditionHandleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
@@ -311,6 +312,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
+            if (config != null) {
+                discovered.add(new WaitConditionHandleCfnProvisioner(config));
+            }
             if (stepFunctionsService != null) {
                 discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
             }
