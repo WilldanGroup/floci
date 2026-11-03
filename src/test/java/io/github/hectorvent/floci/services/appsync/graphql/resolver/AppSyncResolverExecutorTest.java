@@ -151,9 +151,9 @@ class AppSyncResolverExecutorTest {
 
     /** A pipeline of fn1 then fn2 over one data source, under the resolver code "pipeline-code". */
     private Resolver twoFunctionPipeline() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok("before"));
@@ -208,7 +208,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void unitResolverRunsRequestThenDataSourceThenResponse() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         when(appSync.getEnvironmentVariables(API_ID)).thenReturn(Map.of("QUOTA", "10"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
@@ -229,9 +229,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void pipelineRunsBeforeEachFunctionThenAfter() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of(), Map.of("orgNo", "556")));
@@ -251,9 +251,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void pipelineThreadsStashAndPreviousResultThroughEveryStage() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok("before-result", Map.of("orgNo", "556")));
@@ -417,7 +417,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void appendedErrorsAreReturnedBesideTheData() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
         jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of()));
@@ -436,8 +436,8 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aFunctionWithNoResponseHandlerPassesTheDataSourceResultThrough() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
@@ -453,7 +453,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aMissingPipelineFunctionFailsTheFieldByName() {
-        when(appSync.getFunction(API_ID, "gone"))
+        when(appSync.functionForExecution(API_ID, "gone"))
                 .thenThrow(new AwsException("NotFoundException", "Function not found: gone", 404));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("gone")));
@@ -470,7 +470,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aDataSourceErrorReachesTheResponseHandlerAsCtxError() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
         invoker.failure = new AwsException("DatabaseErrorException",
@@ -494,7 +494,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aResponseHandlerThatReRaisesCtxErrorFailsTheField() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
         invoker.failure = new AwsException("DatabaseErrorException", "relation does not exist", 400);
@@ -515,7 +515,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aDataSourceErrorWithNoResponseHandlerFailsTheField() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
         invoker.failure = new AwsException("DatabaseErrorException", "connection refused", 500);
@@ -532,9 +532,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aFunctionThatSuppressesItsErrorLetsThePipelineCarryOn() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", null, "fn2-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(function("fn2", "two", null, "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         invoker.failure = new AwsException("DatabaseErrorException", "deadlock detected", 400);
@@ -557,9 +557,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aFunctionThatReRaisesStopsThePipeline() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(function("fn2", "two", null, "fn2-code"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(function("fn2", "two", null, "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
         invoker.failure = new AwsException("DatabaseErrorException", "deadlock detected", 400);
@@ -580,7 +580,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aCancelledTransactionReachesTheResponseHandlerWithItsResultBesideTheError() {
-        when(appSync.getDataSource(API_ID, "table")).thenReturn(
+        when(appSync.dataSourceForExecution(API_ID, "table")).thenReturn(
                 dataSource("table", DataSourceType.AMAZON_DYNAMODB));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("table");
@@ -603,7 +603,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aSuccessfulCallCarriesNoCtxError() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountDB");
         jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of()));
@@ -620,7 +620,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void jsNoneRequestWithVtlVersionMemberRemainsTheRequestObject() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("local");
         Map<String, Object> request = Map.of("version", "2018-05-29");
@@ -636,7 +636,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlUnitResolverUsesArgumentsSourceStashAndResult() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("""
@@ -663,7 +663,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlReturnHandsTheValueDirectlyToTheField() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("""
@@ -679,7 +679,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlReturnFromRequestSkipsTheDataSourceAndResponseTemplate() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
@@ -694,7 +694,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlNoneRequestWithoutPayloadProducesNullResult() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
@@ -708,7 +708,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlNoneRequestRejectsUnsupportedMembers() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"GetItem\"}");
@@ -724,7 +724,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlDynamoDbResolverUsesTheExistingDataSourceInvoker() {
-        when(appSync.getDataSource(API_ID, "accountTable"))
+        when(appSync.dataSourceForExecution(API_ID, "accountTable"))
                 .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
         dynamoDbInvoker.answer = Map.of("id", "42", "name", "Acme");
         Resolver resolver = resolver(ResolverKind.UNIT, null);
@@ -747,7 +747,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlLambdaResolverUsesTheExistingDataSourceInvoker() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         lambdaInvoker.answer = Map.of("accepted", true);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
@@ -769,7 +769,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlLambdaInvokeWithoutPayloadKeepsTheMemberAbsent() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
@@ -789,7 +789,7 @@ class AppSyncResolverExecutorTest {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
-        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
         LambdaService lambdaService = mock(LambdaService.class);
         when(lambdaService.invokeArn(eq(functionArn), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(new InvokeResult(200, null, "{\"id\":\"42\"}".getBytes(StandardCharsets.UTF_8),
@@ -818,7 +818,7 @@ class AppSyncResolverExecutorTest {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
-        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
         LambdaService lambdaService = mock(LambdaService.class);
         when(lambdaService.invokeArn(eq(functionArn), any(byte[].class),
                 eq(InvocationType.RequestResponse)))
@@ -850,7 +850,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlRdsResolverUsesTheExistingDataSourceInvoker() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         invoker.answer = Map.of("sqlStatementResults", List.of(Map.of("numberOfRecordsUpdated", 1)));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountDB");
@@ -873,7 +873,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlDataSourceErrorIsAvailableToTheResponseTemplate() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         lambdaInvoker.failure = new AwsException("LambdaExecutionException", "function failed", 400);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
@@ -891,7 +891,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void unsupportedVtlDynamoDbOperationFailsBeforeInvocation() {
-        when(appSync.getDataSource(API_ID, "accountTable"))
+        when(appSync.dataSourceForExecution(API_ID, "accountTable"))
                 .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountTable");
@@ -909,7 +909,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void eventLambdaInvocationIsExplicitlyUnsupported() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
@@ -928,7 +928,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void batchLambdaInvocationDoesNotRunAsAnIndependentFieldCall() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
@@ -947,7 +947,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void malformedVtlRdsStatementsFailAsAMappingTemplateError() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountDB");
         resolver.setRequestMappingTemplate(
@@ -963,7 +963,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlAppendErrorKeepsTheResponseData() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("""
@@ -985,7 +985,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlUtilErrorFailsTheFieldWithTheChosenDetails() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
         resolver.setRequestMappingTemplate("""
@@ -1006,7 +1006,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlResponseCanInspectAndSuppressADataSourceError() {
-        when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.dataSourceForExecution(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         noneInvoker.failure = new AwsException("LocalFailure", "none failed", 500);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("local");
@@ -1022,7 +1022,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlRequestReturnCannotBypassUnsupportedDataSourceValidation() {
-        when(appSync.getDataSource(API_ID, "accountHttp"))
+        when(appSync.dataSourceForExecution(API_ID, "accountHttp"))
                 .thenReturn(dataSource("accountHttp", DataSourceType.HTTP));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountHttp");
@@ -1053,9 +1053,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlPipelineThreadsStashAndPreviousResultThroughItsFunctionAndAfterTemplate() {
-        when(appSync.getDataSource(API_ID, "accountTable"))
+        when(appSync.dataSourceForExecution(API_ID, "accountTable"))
                 .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountTable", """
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountTable", """
                 {"version":"2018-05-29","operation":"GetItem",
                  "key":{"id":{"S":$util.toJson($ctx.stash.id)}}}
                 """, """
@@ -1091,8 +1091,8 @@ class AppSyncResolverExecutorTest {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
-        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction", """
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction", """
                 {"version":"2018-05-29","operation":"Invoke",
                  "payload":{"id":$util.toJson($ctx.args.id)}}
                 """, "$util.toJson($ctx.result)"));
@@ -1122,12 +1122,12 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlFunctionRequestReturnSkipsItsDataSourceAndContinuesThePipeline() {
-        when(appSync.getDataSource(API_ID, "local"))
+        when(appSync.dataSourceForExecution(API_ID, "local"))
                 .thenThrow(new AwsException("NotFoundException", "Data source not found", 404));
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
                 "#return({\"cached\":true})", "$util.toJson($ctx.result)"));
-        when(appSync.getFunction(API_ID, "fn2"))
+        when(appSync.functionForExecution(API_ID, "fn2"))
                 .thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
@@ -1154,7 +1154,7 @@ class AppSyncResolverExecutorTest {
         FunctionConfiguration function = vtlFunction("fn1", "local",
                 "#return({\"cached\":true})", "$util.toJson($ctx.result)");
         function.setFunctionVersion("2017-02-28");
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function);
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function);
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
@@ -1170,12 +1170,12 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlFunctionResponseReturnBecomesTheNextFunctionsPreviousResult() {
-        when(appSync.getDataSource(API_ID, "local"))
+        when(appSync.dataSourceForExecution(API_ID, "local"))
                 .thenReturn(dataSource("local", DataSourceType.NONE));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
                 "{\"version\":\"2018-05-29\",\"payload\":{\"id\":\"1\"}}",
                 "#return({\"from\":\"first\"})"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(vtlFunction("fn2", "local", """
+        when(appSync.functionForExecution(API_ID, "fn2")).thenReturn(vtlFunction("fn2", "local", """
                 {"version":"2018-05-29",
                  "payload":{"previous":$util.toJson($ctx.prev.result.from)}}
                 """, "$util.toJson($ctx.result)"));
@@ -1193,9 +1193,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlFunctionCanHandleADataSourceErrorAndContinueToTheAfterTemplate() {
-        when(appSync.getDataSource(API_ID, "accountFunction"))
+        when(appSync.dataSourceForExecution(API_ID, "accountFunction"))
                 .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction",
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction",
                 "{\"version\":\"2018-05-29\",\"operation\":\"Invoke\",\"payload\":{}}", """
                 #if($ctx.error)
                   {"handled":$util.toJson($ctx.error.type)}
@@ -1232,12 +1232,12 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void unsupportedVtlFunctionVersionFailsBeforeDataSourceInvocation() {
-        when(appSync.getDataSource(API_ID, "local"))
+        when(appSync.dataSourceForExecution(API_ID, "local"))
                 .thenReturn(dataSource("local", DataSourceType.NONE));
         FunctionConfiguration function = vtlFunction("fn1", "local",
                 "{\"payload\":{}}", "$util.toJson($ctx.result)");
         function.setFunctionVersion("2017-02-28");
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function);
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function);
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
@@ -1252,9 +1252,9 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlFunctionRequestWithoutVersionFailsBeforeDataSourceInvocation() {
-        when(appSync.getDataSource(API_ID, "local"))
+        when(appSync.dataSourceForExecution(API_ID, "local"))
                 .thenReturn(dataSource("local", DataSourceType.NONE));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
                 "{\"payload\":{}}", "$util.toJson($ctx.result)"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, null);
         resolver.setRequestMappingTemplate("{}");
@@ -1270,7 +1270,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void anExplicitVtlRuntimeIsRefusedEvenWithCode() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         Resolver resolver = resolver(ResolverKind.UNIT, "$util.toJson($ctx.args)");
         resolver.setDataSourceName("accountDB");
         Resolver.ResolverRuntime runtime = new Resolver.ResolverRuntime();
@@ -1285,8 +1285,8 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aStageWithNeitherCodeNorTemplatesStillPassesThrough() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
-        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", null));
+        when(appSync.dataSourceForExecution(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.functionForExecution(API_ID, "fn1")).thenReturn(function("fn1", "one", "accountDB", null));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
@@ -1302,7 +1302,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void aControlPlaneFailureLookingUpAFunctionIsNotReportedAsMissing() {
-        when(appSync.getFunction(API_ID, "fn1"))
+        when(appSync.functionForExecution(API_ID, "fn1"))
                 .thenThrow(new AwsException("ConcurrentModificationException",
                         "Schema is being modified", 409));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
@@ -1332,7 +1332,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void findResolverPropagatesAFailureThatIsNotAMissingResolver() {
-        when(appSync.getResolver(anyString(), anyString(), anyString()))
+        when(appSync.resolverForExecution(anyString(), anyString(), anyString()))
                 .thenThrow(new AwsException("ConcurrentModificationException",
                         "Schema is being modified", 409));
 
@@ -1343,7 +1343,7 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void findResolverAnswersNullWhenTheFieldHasNone() {
-        when(appSync.getResolver(anyString(), anyString(), anyString()))
+        when(appSync.resolverForExecution(anyString(), anyString(), anyString()))
                 .thenThrow(new AwsException("NotFoundException", "Resolver not found", 404));
 
         // Null is what tells the data fetcher to fall back to reading the field off its source.

@@ -346,6 +346,11 @@ public class AppSyncService {
 
     public DataSource getDataSource(String apiId, String dataSourceName) {
         assertSchemaNotBusy(apiId);
+        return dataSourceForExecution(apiId, dataSourceName);
+    }
+
+    /** The data source a query's resolver invokes, read past the schema creation guard, as for a resolver. */
+    public DataSource dataSourceForExecution(String apiId, String dataSourceName) {
         return dataSourceStore.get(apiKey(apiId, dataSourceName))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Data source not found: " + dataSourceName, 404));
     }
@@ -455,6 +460,15 @@ public class AppSyncService {
 
     public Resolver getResolver(String apiId, String typeName, String fieldName) {
         assertSchemaNotBusy(apiId);
+        return resolverForExecution(apiId, typeName, fieldName);
+    }
+
+    /**
+     * The resolver a query runs a field through, read as it stands: AppSync goes on serving an API's queries
+     * while a schema creation is in flight, which refuses a change to the API, never a query, so the data
+     * plane reads past the guard the control plane's reads take.
+     */
+    public Resolver resolverForExecution(String apiId, String typeName, String fieldName) {
         return resolverStore.get(resolverKey(apiId, typeName, fieldName))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Resolver not found: " + typeName + "." + fieldName, 404));
@@ -533,6 +547,11 @@ public class AppSyncService {
 
     public FunctionConfiguration getFunction(String apiId, String functionId) {
         assertSchemaNotBusy(apiId);
+        return functionForExecution(apiId, functionId);
+    }
+
+    /** A pipeline's function as a query runs it, read past the schema creation guard, as for a resolver. */
+    public FunctionConfiguration functionForExecution(String apiId, String functionId) {
         return functionStore.get(apiKey(apiId, functionId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Function not found: " + functionId, 404));
     }
