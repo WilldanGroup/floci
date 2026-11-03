@@ -1,10 +1,14 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -172,6 +176,9 @@ class AppSyncJsResolverDockerIntegrationTest {
             """;
 
     private String apiId;
+
+    @Inject
+    StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
     private String apiKey;
     private static final String NORMALIZE_STRING_RESOLVER = """
         import { util } from "@aws-appsync/utils";
@@ -281,6 +288,25 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.ping", equalTo("pong"));
+    }
+
+    /**
+     * A schema creation in flight refuses a change to the API, never a query: AppSync goes on serving the
+     * API's fields through the resolvers and data sources that stand while it runs.
+     */
+    @Test
+    void aQueryIsAnsweredWhileASchemaCreationIsInFlight() {
+        SchemaCreationStatus processing = new SchemaCreationStatus();
+        processing.setStatus(SchemaCreationStatusType.PROCESSING);
+        schemaStatusStore.put(apiId, processing);
+        try {
+            query("{ ping }")
+                .statusCode(200)
+                .body("errors", nullValue())
+                .body("data.ping", equalTo("pong"));
+        } finally {
+            schemaStatusStore.delete(apiId);
+        }
     }
 
     @Test

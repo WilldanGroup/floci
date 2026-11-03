@@ -91,11 +91,10 @@ public class AppSyncResolverExecutor {
      */
     public Resolver findResolver(String apiId, String typeName, String fieldName) {
         try {
-            return appSyncService.getResolver(apiId, typeName, fieldName);
+            return appSyncService.resolverForExecution(apiId, typeName, fieldName);
         } catch (AwsException e) {
-            // Only "there is no resolver" means fall back to the default fetcher. Anything else (a schema
-            // mid-recreation answers 409) has to surface, or a field would read as
-            // unresolved during a deploy and quietly return null.
+            // Only "there is no resolver" means fall back to the default fetcher. Anything else has to
+            // surface, or a field would read as unresolved and quietly return null.
             if (e.getHttpStatus() == 404) {
                 return null;
             }
@@ -272,10 +271,10 @@ public class AppSyncResolverExecutor {
 
         private FunctionConfiguration function(String functionId) {
             try {
-                return appSyncService.getFunction(apiId, functionId);
+                return appSyncService.functionForExecution(apiId, functionId);
             } catch (AwsException e) {
-                // Only "no such function" is that. A 409 from a schema mid-recreation, or any other
-                // control-plane failure, has to surface as itself or the real cause is lost.
+                // Only "no such function" is that. Any other failure has to surface as itself or the
+                // real cause is lost.
                 if (e.getHttpStatus() != 404) {
                     throw e;
                 }
@@ -325,7 +324,7 @@ public class AppSyncResolverExecutor {
         private DataSource dataSource(String dataSourceName) {
             DataSource dataSource;
             try {
-                dataSource = appSyncService.getDataSource(apiId, dataSourceName);
+                dataSource = appSyncService.dataSourceForExecution(apiId, dataSourceName);
             } catch (AwsException e) {
                 // Not a data source error the resolver could handle (the data source it names does
                 // not exist), so this fails the field rather than reaching ctx.error.
