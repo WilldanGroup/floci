@@ -92,6 +92,7 @@ public class ContainerLifecycleManager {
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
+    private final DockerDaemonBackend dockerDaemonBackend;
     private final EmulatorConfig config;
     private final long archiveRetryBackoffMillis;
 
@@ -105,8 +106,18 @@ public class ContainerLifecycleManager {
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
+                                     DockerDaemonBackend dockerDaemonBackend,
                                      EmulatorConfig config) {
-        this(dockerClient, imageCacheService, containerDetector, config,
+        this(dockerClient, imageCacheService, containerDetector, dockerDaemonBackend, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+    }
+
+    /** Reads the daemon's backend through {@code dockerClient} itself, for callers outside CDI. */
+    public ContainerLifecycleManager(DockerClient dockerClient,
+                                     ImageCacheService imageCacheService,
+                                     ContainerDetector containerDetector,
+                                     EmulatorConfig config) {
+        this(dockerClient, imageCacheService, containerDetector, new DockerDaemonBackend(dockerClient), config,
                 RetryingTarCopier.DEFAULT_BACKOFF_MS);
     }
 
@@ -115,9 +126,20 @@ public class ContainerLifecycleManager {
                               ContainerDetector containerDetector,
                               EmulatorConfig config,
                               long archiveRetryBackoffMillis) {
+        this(dockerClient, imageCacheService, containerDetector, new DockerDaemonBackend(dockerClient), config,
+                archiveRetryBackoffMillis);
+    }
+
+    private ContainerLifecycleManager(DockerClient dockerClient,
+                                      ImageCacheService imageCacheService,
+                                      ContainerDetector containerDetector,
+                                      DockerDaemonBackend dockerDaemonBackend,
+                                      EmulatorConfig config,
+                                      long archiveRetryBackoffMillis) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
+        this.dockerDaemonBackend = dockerDaemonBackend;
         this.config = config;
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
     }
@@ -359,10 +381,12 @@ public class ContainerLifecycleManager {
     /**
      * Applies endpoint IPAM while the container is still in CREATED state. docker-java does not
      * expose Docker's {@code NetworkingConfig} on create, but it does expose the equivalent
-     * network-connect endpoint, so the container is reconnected before it starts.
+     * network-connect endpoint, so the container is reconnected before it starts. A container the
+     * create put on its network is disconnected first, since Docker refuses a second connect to a
+     * network the container is on; one created on the default bridge is only connected.
      */
     private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
-        if (!spec.hasPortBindings()) {
+        if (joinsNetworkAtCreate(spec)) {
             dockerClient.disconnectFromNetworkCmd()
                     .withContainerId(containerId)
                     .withNetworkId(spec.networkMode())
@@ -483,7 +507,7 @@ public class ContainerLifecycleManager {
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank()
-                && spec.publishesPorts() && !spec.hasNetworkConfiguration()) {
+                && !joinsNetworkAtCreate(spec) && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -1362,10 +1386,11 @@ public class ContainerLifecycleManager {
 
     /**
      * Like {@link #resolveEndpoint(String, int)}, but prefers the container's address on
-     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. A
-     * container that publishes ports is created on the default bridge and connected to its
-     * service network after start, so without a preference the bridge address, which Floci
-     * usually cannot reach, can be returned instead.
+     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. On
+     * Docker Desktop a container that publishes ports is created on the default bridge and
+     * connected to its service network after start, and a container an earlier Floci created that
+     * way may still be on both, so without a preference the bridge address, which Floci usually
+     * cannot reach, can be returned instead.
      */
     public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
@@ -1599,12 +1624,14 @@ public class ContainerLifecycleManager {
                     spec.name(), spec.networkMode(), spec.portBindings().keySet());
         }
 
-        // Network mode: only set during creation when no host ports are published.
-        // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
-        // so containers with published ports (e.g. ECR registry) connect to the network
-        // after start via connectToNetworkCmd() instead. host, none and container:<id> publish
-        // nothing and cannot be connected after creation, so they always go on the HostConfig.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.publishesPorts()) {
+        // Network mode: set during creation, so the container joins its network alone, except
+        // for a container that publishes host ports on Docker Desktop, where withNetworkMode() +
+        // port bindings suppresses port publishing. There such a container (e.g. the ECR
+        // registry) is created on the default bridge and connected to its network after start
+        // via connectToNetworkCmd() instead (joinsNetworkAtCreate). host, none and container:<id>
+        // publish nothing and cannot be connected after creation, so they always go on the
+        // HostConfig.
+        if (joinsNetworkAtCreate(spec)) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 
@@ -1714,6 +1741,22 @@ public class ContainerLifecycleManager {
         }
         hostCpuCount.set(resolved);
         return resolved;
+    }
+
+    /**
+     * Whether the create names the spec's network, so the container joins it, and it alone, from
+     * the start. Docker publishes the ports of a container on a user-defined network as it does on
+     * the default bridge (Docker docs, Networking, Port publishing and mapping; Engine API,
+     * {@code POST /containers/create}, {@code HostConfig.NetworkMode} and
+     * {@code HostConfig.PortBindings}), so only a container that publishes host ports on Docker
+     * Desktop, which drops them when a network is named at create, is left to the post-start
+     * connect. An unreadable daemon answer counts as not Docker Desktop.
+     */
+    private boolean joinsNetworkAtCreate(ContainerSpec spec) {
+        if (spec.networkMode() == null || spec.networkMode().isBlank()) {
+            return false;
+        }
+        return !spec.publishesPorts() || !dockerDaemonBackend.isDockerDesktop();
     }
 
     private static boolean isContainerNetworkMode(String networkMode) {

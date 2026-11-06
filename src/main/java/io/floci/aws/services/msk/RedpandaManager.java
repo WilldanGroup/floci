@@ -312,7 +312,8 @@ public class RedpandaManager {
      *
      * <p>The network startContainer put the broker on is preferred, as it was when createAndStart
      * resolved the Kafka endpoint: in container mode the broker publishes the host listener, so
-     * it is on the default bridge as well, and the bridge address is not one Floci can reach.
+     * on Docker Desktop it is on the default bridge as well, and the bridge address is not one
+     * Floci can reach.
      */
     String adminBaseUrl(MskCluster cluster) {
         String network = containerBuilder.resolveDockerNetwork(config.services().dockerNetwork()).orElse(null);

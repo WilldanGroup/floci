@@ -5,6 +5,7 @@ import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.model.Info;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.DockerDaemonBackend;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
@@ -38,7 +39,7 @@ class ContainerNetworkReachabilityTest {
         when(infoCmd.exec()).thenReturn(info);
         when(info.getOperatingSystem()).thenReturn(dockerOperatingSystem);
 
-        return new ContainerNetworkReachability(config, detector, dockerClient);
+        return new ContainerNetworkReachability(config, detector, new DockerDaemonBackend(dockerClient));
     }
 
     @Test
@@ -49,7 +50,7 @@ class ContainerNetworkReachabilityTest {
         ContainerDetector detector = mock(ContainerDetector.class);
 
         ContainerNetworkReachability reachability =
-                new ContainerNetworkReachability(config, detector, dockerClient);
+                new ContainerNetworkReachability(config, detector, new DockerDaemonBackend(dockerClient));
 
         assertTrue(reachability.isContainerIpRoutable(UNROUTABLE_IP));
         verify(dockerClient, never()).infoCmd();
