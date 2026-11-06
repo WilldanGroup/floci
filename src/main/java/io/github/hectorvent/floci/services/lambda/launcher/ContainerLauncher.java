@@ -1005,10 +1005,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         lifecycleManager.ensureVolume(volName);
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
-        // tar-copy the code into it, then discard it — the data persists in the volume.
+        // tar-copy the code into it, then discard it — the data persists in the volume. It joins the
+        // network the function's container does, so it never lands on Docker's default bridge.
         ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
                 .withName(ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config),
                         "codevol-" + fn.getFunctionName() + "-" + shortId))
+                .withDockerNetwork(config.services().lambda().dockerNetwork())
                 .withEnv(List.of())
                 .withEntrypoint(List.of("sleep"))
                 .withCmd(List.of("3600"))

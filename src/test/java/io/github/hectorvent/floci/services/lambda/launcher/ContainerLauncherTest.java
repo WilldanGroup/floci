@@ -1454,6 +1454,33 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_codeVolumeHelperJoinsTheFunctionsNetwork() throws Exception {
+        when(config.services().lambda().dockerNetwork()).thenReturn(Optional.of("container:floci"));
+        Path codePath = Files.createDirectory(tempDir.resolve("networked-large-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("networked-large-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("networked-large-fn-sha-v1");
+        when(lifecycleManager.create(any())).thenReturn("helper-123", "container-123");
+
+        withLoweredCodeVolumeThreshold(() -> {
+            launcher.launch(fn);
+        });
+
+        ArgumentCaptor<ContainerSpec> specs = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager, times(2)).create(specs.capture());
+        // The helper that populates the code volume starts where the function's container does,
+        // never on Docker's default bridge.
+        assertEquals("container:floci", specs.getAllValues().get(0).networkMode(),
+                "the code-volume helper joins the function's network");
+        assertEquals("container:floci", specs.getAllValues().get(1).networkMode());
+    }
+
+    @Test
     void launchFunction_usesReadOnlyVolume_forLargeCode() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("large-code"));
         Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
