@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.DisconnectFromNetworkCmd;
+import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
@@ -14,6 +15,7 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -111,11 +113,83 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
-    void createKeepsPublishedPortsByConnectingWithoutDisconnecting() {
+    void createKeepsPublishedPortsOnDockerDesktopByConnectingWithoutDisconnecting() {
+        daemonAnswers("Docker Desktop");
+
         manager().create(specWithLinkLocalIp(Map.of(8080, 18080)));
 
         verify(disconnectCmd, never()).exec();
         verify(connectCmd).exec();
+    }
+
+    /**
+     * Off Docker Desktop a publishing container is created on its network, so the link-local
+     * reconnect must leave it first: Docker refuses a second connect to a network the container is
+     * already on.
+     */
+    @Test
+    void createReconnectsLinkLocalEndpointOfAPublishingContainerOnALinuxDaemon() {
+        daemonAnswers("Ubuntu 24.04 LTS");
+
+        manager().create(specWithLinkLocalIp(Map.of(8080, 18080)));
+
+        assertEquals("test-network", createdHostConfig().getNetworkMode());
+        InOrder order = inOrder(createCmd, disconnectCmd, connectCmd);
+        order.verify(createCmd).exec();
+        order.verify(disconnectCmd).exec();
+        order.verify(connectCmd).exec();
+    }
+
+    /**
+     * Docker publishes the ports of a container on a user-defined network as it does on the
+     * default bridge, so off Docker Desktop the container is created on its network, and it alone:
+     * it never joins the default bridge, which a create with no network mode and a connect after
+     * start left it on as well.
+     */
+    @Test
+    void createAndStartPutsThePublishingContainerOnItsNetworkAloneOnALinuxDaemon() {
+        daemonAnswers("Ubuntu 24.04 LTS");
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        when(inspectOf("container-id").getNetworkSettings()).thenReturn(mock(NetworkSettings.class));
+
+        manager().createAndStart(spec("floci-net", Map.of(5000, 15000), List.of()));
+
+        HostConfig hostConfig = createdHostConfig();
+        assertEquals("floci-net", hostConfig.getNetworkMode());
+        Ports.Binding[] binding = hostConfig.getPortBindings().getBindings().get(ExposedPort.tcp(5000));
+        assertEquals("15000", binding[0].getHostPortSpec());
+        verify(connectCmd, never()).exec();
+    }
+
+    /** Docker Desktop drops the published ports of a container whose network is named at create. */
+    @Test
+    void createAndStartConnectsThePublishingContainerAfterStartOnDockerDesktop() {
+        daemonAnswers("Docker Desktop");
+        StartContainerCmd startCmd = mock(StartContainerCmd.class);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(startCmd);
+        when(inspectOf("container-id").getNetworkSettings()).thenReturn(mock(NetworkSettings.class));
+
+        manager().createAndStart(spec("floci-net", Map.of(5000, 15000), List.of()));
+
+        HostConfig hostConfig = createdHostConfig();
+        assertNull(hostConfig.getNetworkMode());
+        assertEquals("15000",
+                hostConfig.getPortBindings().getBindings().get(ExposedPort.tcp(5000))[0].getHostPortSpec());
+        InOrder order = inOrder(startCmd, connectCmd);
+        order.verify(startCmd).exec();
+        order.verify(connectCmd).exec();
+        verify(connectCmd).withNetworkId("floci-net");
+    }
+
+    @Test
+    void createPutsThePublishingContainerOnItsNetworkWhenTheDaemonCannotSayWhatItIs() {
+        InfoCmd infoCmd = mock(InfoCmd.class);
+        when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        when(infoCmd.exec()).thenThrow(new RuntimeException("daemon busy"));
+
+        manager().create(spec("floci-net", Map.of(5000, 15000), List.of()));
+
+        assertEquals("floci-net", createdHostConfig().getNetworkMode());
     }
 
     @ParameterizedTest
@@ -138,6 +212,7 @@ class ContainerLifecycleManagerNetworkTest {
 
     @Test
     void createAndStartFailsAndRemovesThePublishingContainerWhenItsNetworkDoesNotExist() {
+        daemonAnswers("Docker Desktop");
         when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
         when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
@@ -153,6 +228,7 @@ class ContainerLifecycleManagerNetworkTest {
 
     @Test
     void createAndStartKeepsThePublishingContainerWhenJoiningAnExistingNetworkFails() {
+        daemonAnswers("Docker Desktop");
         when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
         doThrow(new RuntimeException("endpoint already exists")).when(connectCmd).exec();
         NetworkSettings networks = mock(NetworkSettings.class);
@@ -176,10 +252,11 @@ class ContainerLifecycleManagerNetworkTest {
      * Pins the {@code !spec.hasNetworkConfiguration()} guard in {@code startCreated}: without it,
      * a container with both published ports and a link-local address would be connected twice,
      * once by {@code create}'s pre-start attach and again by {@code startCreated}'s post-start
-     * reconnect for port-bound containers (raised in review on #4063).
+     * reconnect for port-bound containers on Docker Desktop (raised in review on #4063).
      */
     @Test
     void createAndStartConnectsOnceForPortsPlusLinkLocalIp() {
+        daemonAnswers("Docker Desktop");
         when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
         InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class, RETURNS_SELF);
         InspectContainerResponse inspect = mock(InspectContainerResponse.class);
@@ -399,6 +476,14 @@ class ContainerLifecycleManagerNetworkTest {
         InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
         when(state.getRunning()).thenReturn(true);
         return state;
+    }
+
+    private void daemonAnswers(String operatingSystem) {
+        InfoCmd infoCmd = mock(InfoCmd.class);
+        Info info = mock(Info.class);
+        when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        when(infoCmd.exec()).thenReturn(info);
+        when(info.getOperatingSystem()).thenReturn(operatingSystem);
     }
 
     private InspectContainerResponse inspectOf(String containerId) {
