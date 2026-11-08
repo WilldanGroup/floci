@@ -119,7 +119,8 @@ public class CloudFormationQueryHandler {
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
 
-        cfnService.createChangeSet(stackName, "initial-create", "CREATE",
+        // A root left in REVIEW_IN_PROGRESS that no operation holds is taken, as CloudFormation takes it.
+        cfnService.createChangeSetForCreateStack(stackName, "initial-create",
                 templateBody, templateUrl, parameters, capabilities, tags, region);
         awaitExecution(cfnService.executeChangeSet(stackName, "initial-create", region));
 

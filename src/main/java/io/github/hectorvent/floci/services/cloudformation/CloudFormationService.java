@@ -332,7 +332,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             String previousTemplate = previousTemplateOf(stack);
             created = createChangeSet(stackName, changeSetName, "UPDATE", previousTemplate, null,
-                    parameters, capabilities, tags, region, currentAccount(), false, true);
+                    parameters, capabilities, tags, region, currentAccount(), ReviewRoot.CONFLICTS, true);
         }
         return created;
     }
@@ -350,7 +350,39 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), ReviewRoot.CONFLICTS, false);
+    }
+
+    /**
+     * What a CREATE change set does with a root stack that stands in {@code REVIEW_IN_PROGRESS} under its name.
+     */
+    private enum ReviewRoot {
+        /** Refuses it as a name in use: the change sets UpdateStack and StackSet deployment make. */
+        CONFLICTS,
+        /** Goes on it beside the change sets it holds: the {@code CreateChangeSet} operation. */
+        ATTACHES,
+        /**
+         * Takes it, keeping its stack ID and clearing the change sets it holds, unless an operation holds it:
+         * the change set {@code CreateStack} makes and executes at once.
+         */
+        TAKES
+    }
+
+    /**
+     * The change set the {@code CreateStack} operation makes and executes at once, as
+     * {@link #createChangeSet(String, String, String, String, String, Map, List, Map, String)}, except over a root
+     * stack left in {@code REVIEW_IN_PROGRESS} that no operation holds: a CREATE change set nobody executed leaves
+     * one, and so does deleting that change set. CloudFormation's {@code CreateStack} takes such a root, keeping its
+     * stack ID, and clears the change set it holds; this does the same. A root still holds an operation while another
+     * {@code CreateStack}'s own change set waits on it for its execute, and that stays a name in use, so two racing
+     * {@code CreateStack} requests never both provision it.
+     */
+    public ChangeSet createChangeSetForCreateStack(String stackName, String changeSetName,
+                                                   String templateBody, String templateUrl,
+                                                   Map<String, String> parameters, List<String> capabilities,
+                                                   Map<String, String> tags, String region) {
+        return createChangeSet(stackName, changeSetName, "CREATE", templateBody, templateUrl,
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), ReviewRoot.TAKES, false);
     }
 
     /**
@@ -368,13 +400,14 @@ public class CloudFormationService implements ResourceProvider {
      * where a stack is only ever momentarily {@code REVIEW_IN_PROGRESS} - between {@link #newStack}
      * and the execute that immediately follows - and treating that window as reusable would let two
      * racing {@code CreateStack} requests both provision the same template.
+     * {@link #createChangeSetForCreateStack} takes a root left in review only once that window is over.
      */
     public ChangeSet createChangeSetForRequest(String stackName, String changeSetName, String changeSetType,
                                                String templateBody, String templateUrl,
                                                Map<String, String> parameters, List<String> capabilities,
                                                Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), ReviewRoot.ATTACHES, false);
     }
 
     /**
@@ -392,14 +425,30 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region, String accountId) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, accountId, false, false);
+                parameters, capabilities, tags, region, accountId, ReviewRoot.CONFLICTS, false);
+    }
+
+    /**
+     * Whether a CREATE change set made as {@code reviewRoot} says goes on the stack holding its name, rather than
+     * conflicting with it: only one in {@code REVIEW_IN_PROGRESS}, and for {@link ReviewRoot#TAKES} only a root no
+     * operation holds.
+     */
+    private static boolean goesOnStackInReview(Stack stack, ReviewRoot reviewRoot) {
+        if (!"REVIEW_IN_PROGRESS".equals(stack.getStatus())) {
+            return false;
+        }
+        return switch (reviewRoot) {
+            case CONFLICTS -> false;
+            case ATTACHES -> true;
+            case TAKES -> stack.changeSetsSnapshot().values().stream().noneMatch(ChangeSet::isHeldForExecute);
+        };
     }
 
     private ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
                                       String templateBody, String templateUrl,
                                       Map<String, String> parameters, List<String> capabilities,
                                       Map<String, String> tags, String region, String accountId,
-                                      boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
+                                      ReviewRoot reviewRoot, boolean fromPreviousTemplate) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
         requireValidTemplate(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
@@ -413,7 +462,7 @@ public class CloudFormationService implements ResourceProvider {
         // deployed value for its UsePreviousValue to keep.
         Stack named = isCreateType ? stacks.get(stackKey(accountId, stackName, region)) : live;
         boolean refusedForItsStack = isCreateType
-                ? named != null && !(attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(named.getStatus()))
+                ? named != null && !goesOnStackInReview(named, reviewRoot)
                 : named == null || "DELETE_COMPLETE".equals(named.getStatus()) || refusesUpdate(named.getStatus());
         if (!refusedForItsStack) {
             requireParameterValues(resolvedTemplate, parameters);
@@ -458,17 +507,19 @@ public class CloudFormationService implements ResourceProvider {
         // exists but has never been executed, so the stack is a placeholder the next CREATE change
         // set attaches to rather than a deployment to conflict with. The AWS CLI's `deploy` and SAM
         // both depend on it - their has_stack treats REVIEW_IN_PROGRESS as nonexistent and sends a
-        // second CREATE change set, which real CloudFormation accepts.
+        // second CREATE change set, which real CloudFormation accepts. CreateStack takes such a
+        // root too, once no operation holds it (see createChangeSetForCreateStack).
         //
         // The existence check and the insert must be one atomic operation: compute() holds the
         // map's per-key lock for the whole call, so two CreateStack requests racing for the same
         // unused name can no longer both see "absent" and then share whichever Stack
         // computeIfAbsent settled on - the second one now finds the first's stack already there
         // and throws, instead of both executing the template concurrently. That race is also why
-        // the exemption above is scoped to the explicit operation: on the CreateStack path every
-        // brand-new stack is REVIEW_IN_PROGRESS for the moment between newStack() and the execute
-        // that follows it, so exempting the status outright would hand the racing request the same
-        // stack and reopen exactly this hole.
+        // CreateStack takes a root in review only once no operation holds it: on the CreateStack path
+        // every brand-new stack is REVIEW_IN_PROGRESS for the moment between newStack() and the
+        // execute that follows it, so exempting the status outright would hand the racing request the
+        // same stack and reopen exactly this hole. The change set CreateStack records holds its stack
+        // for that moment, and the execute's claim releases it.
         //
         // Recording the change set happens inside the same remapping function, for the same reason.
         // Stack#changeSets is a plain LinkedHashMap, so two requests that legitimately share one
@@ -507,11 +558,17 @@ public class CloudFormationService implements ResourceProvider {
                 }
             } else {
                 String status = existing.getStatus();
-                boolean reusableReviewPlaceholder =
-                        attachToReviewInProgressStack && "REVIEW_IN_PROGRESS".equals(status);
-                if (isCreateType && !reusableReviewPlaceholder) {
+                if (isCreateType && !goesOnStackInReview(existing, reviewRoot)) {
                     throw new AwsException("AlreadyExistsException",
                             "Stack [" + stackName + "] already exists", 400);
+                }
+                if (isCreateType && reviewRoot == ReviewRoot.TAKES) {
+                    // CreateStack's stack carries the tags it was given, and nothing of the root's
+                    // unexecuted change sets stays.
+                    existing.replaceTags(tags != null ? tags : Map.of());
+                    synchronized (existing.getChangeSets()) {
+                        existing.getChangeSets().clear();
+                    }
                 }
                 // A name whose stack has finished deleting names no live stack, even before it leaves the
                 // map, and neither does a stack ID that is not the live stack's.
@@ -555,6 +612,9 @@ public class CloudFormationService implements ResourceProvider {
                 cs.setStatus("CREATE_COMPLETE");
                 cs.setExecutionStatus("AVAILABLE");
             }
+            // CreateStack's own change set holds its stack until that request's execute claims it, so
+            // a second CreateStack meeting the stack in REVIEW_IN_PROGRESS meanwhile finds the name in use.
+            cs.setHeldForExecute(reviewRoot == ReviewRoot.TAKES);
             target.getChangeSets().put(changeSetName, cs);
             created[0] = cs;
             return target;
@@ -1211,6 +1271,9 @@ public class CloudFormationService implements ResourceProvider {
             boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
                     "CREATE_IN_PROGRESS".equals(existing.getStatus());
             cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
+            // The execute has its change set now: the stack leaves REVIEW_IN_PROGRESS below, and an
+            // execute refused after this claim leaves a root no operation holds.
+            cs.setHeldForExecute(false);
             if (requireAvailable) {
                 // CloudFormation deletes every other change set on the stack once one of them executes.
                 synchronized (existing.getChangeSets()) {

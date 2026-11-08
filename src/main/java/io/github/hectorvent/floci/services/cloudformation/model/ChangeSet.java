@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -24,6 +25,12 @@ public class ChangeSet {
     private Map<String, String> tags;
     private String changeSetType; // CREATE or UPDATE
     private Instant creationTime = Instant.now();
+    /**
+     * Whether a {@code CreateStack} request made this change set and its execute has not claimed it yet. It lives
+     * as long as that request, so it is never stored: a stack read back from storage is held by no request.
+     */
+    @JsonIgnore
+    private transient volatile boolean heldForExecute;
 
     public String getChangeSetId() { return changeSetId; }
     public void setChangeSetId(String changeSetId) { this.changeSetId = changeSetId; }
@@ -51,4 +58,8 @@ public class ChangeSet {
     public void setChangeSetType(String changeSetType) { this.changeSetType = changeSetType; }
     public Instant getCreationTime() { return creationTime; }
     public void setCreationTime(Instant creationTime) { this.creationTime = creationTime; }
+    @JsonIgnore
+    public boolean isHeldForExecute() { return heldForExecute; }
+    @JsonIgnore
+    public void setHeldForExecute(boolean heldForExecute) { this.heldForExecute = heldForExecute; }
 }

@@ -11918,42 +11918,6 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void createStack_onReviewInProgressStack_throwsAlreadyExistsException() {
-        // CreateStack does not get the REVIEW_IN_PROGRESS exemption, and must not: every stack it
-        // creates is REVIEW_IN_PROGRESS for the window between newStack() and the execute that
-        // immediately follows, so exempting the status on this path would let two racing
-        // CreateStack requests share one stack and both provision the template - the very race
-        // createStack_concurrentRequestsForUnusedName_exactlyOneSucceeds covers. LocalStack draws
-        // the same line: its create_stack conflicts on any status but DELETE_COMPLETE, while only
-        // its create_change_set exempts REVIEW_IN_PROGRESS.
-        String template = """
-            {
-              "Resources": {
-                "MyBus": { "Type": "AWS::Events::EventBus", "Properties": { "Name": "cfn-2365-implicit-bus" } }
-              }
-            }
-            """;
-        String stackName = "cfn-2365-implicit-stack";
-
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateChangeSet")
-            .formParam("StackName", stackName)
-            .formParam("ChangeSetName", "pending")
-            .formParam("ChangeSetType", "CREATE")
-            .formParam("TemplateBody", template)
-        .when().post("/").then().statusCode(200);
-
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateStack")
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
-        .when().post("/")
-        .then().body(containsString("AlreadyExistsException"));
-    }
-
-    @Test
     void createStack_apiGatewayRestApi_withEndpointConfiguration() {
         String template = """
             {
