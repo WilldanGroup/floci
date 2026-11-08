@@ -420,6 +420,17 @@ The CDK then deletes that change set, and before its next deploy deletes it agai
 status, named with its stack or by its ARN alone; a `StackName` that names no stack is still a
 `ValidationError`.
 
+## A Stack in Review
+
+A CREATE change set leaves the stack it creates in `REVIEW_IN_PROGRESS`, with a stack ID and no template or
+resources, until the change set is executed (CloudFormation API Reference, CreateChangeSet, `ChangeSetType`), and
+deleting that change set leaves the stack there too. Another CREATE change set from `CreateChangeSet` goes on such
+a stack beside the change sets it holds, as `aws cloudformation deploy` and SAM rely on. `CreateStack` takes it, as
+CloudFormation does: the stack keeps its `StackId`, carries the tags the request gives, and the change sets it held
+are cleared, with the nested change sets they planned. A stack another `CreateStack` has just created and not yet
+started executing, and one planned under another change set, are a name in use, and `CreateStack` is refused on
+them with `AlreadyExistsException`, as on a stack in any other status.
+
 ## Change Sets for Nested Stacks
 
 A change set created with `IncludeNestedStacks` plans a change set on each nested stack it modifies, and on theirs

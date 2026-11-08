@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -29,6 +30,12 @@ public class ChangeSet {
     private String rootChangeSetId;
     /** The change set planned for each nested stack this one modifies, by the nested stack's logical ID. */
     private Map<String, String> nestedChangeSetIds = new LinkedHashMap<>();
+    /**
+     * Whether a {@code CreateStack} request made this change set and its execute has not claimed it yet. It lives
+     * as long as that request, so it is never stored: a stack read back from storage is held by no request.
+     */
+    @JsonIgnore
+    private transient volatile boolean heldForExecute;
 
     public String getChangeSetId() { return changeSetId; }
     public void setChangeSetId(String changeSetId) { this.changeSetId = changeSetId; }
@@ -66,4 +73,8 @@ public class ChangeSet {
     public void setNestedChangeSetIds(Map<String, String> nestedChangeSetIds) {
         this.nestedChangeSetIds = nestedChangeSetIds == null ? new LinkedHashMap<>() : new LinkedHashMap<>(nestedChangeSetIds);
     }
+    @JsonIgnore
+    public boolean isHeldForExecute() { return heldForExecute; }
+    @JsonIgnore
+    public void setHeldForExecute(boolean heldForExecute) { this.heldForExecute = heldForExecute; }
 }
