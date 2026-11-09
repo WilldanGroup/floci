@@ -737,6 +737,16 @@ public class EcrService implements ResourceProvider {
         return identifiers;
     }
 
+    /**
+     * Describes a repository's images as AWS does: one {@link ImageDetail} per image, an image being
+     * one manifest digest, its {@code imageTags} every tag of the repository that points at that
+     * digest. With no ids, the repository's tags are listed and each one's manifest read once, and
+     * an entry is kept per digest in the order the digests are first met, so pushing an image again
+     * under a new tag adds the tag to its entry and no entry. With ids, each id that names a manifest,
+     * by a tag or by its digest, answers one entry carrying every tag of its image, read from one
+     * listing of the repository's tags; an image no tag points at carries none. The listing starts
+     * from the tags, so an image no tag points at is not listed.
+     */
     public DescribeImagesResult describeImages(String repositoryName,
                                                 List<ImageIdentifier> requested,
                                                 String registryId,
@@ -746,69 +756,123 @@ public class EcrService implements ResourceProvider {
         String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         RegistryHttpClient http = registryManager.httpClient();
 
-        List<String> refs = new ArrayList<>();
-        if (requested == null || requested.isEmpty()) {
-            try {
-                refs.addAll(http.listTags(internal));
-            } catch (Exception e) {
-                LOG.warnv("DescribeImages tag enumeration failed for {0}: {1}", repositoryName, e.getMessage());
-            }
-        } else {
-            for (ImageIdentifier id : requested) {
-                if (id.getImageTag() != null) refs.add(id.getImageTag());
-                else if (id.getImageDigest() != null) refs.add(id.getImageDigest());
-            }
-        }
-
         boolean explicitRequest = requested != null && !requested.isEmpty();
         List<ImageDetail> details = new ArrayList<>();
         List<ImageFailure> failures = new ArrayList<>();
-        for (String ref : refs) {
+        if (!explicitRequest) {
+            List<String> tags = List.of();
+            try {
+                tags = http.listTags(internal);
+            } catch (Exception e) {
+                LOG.warnv("DescribeImages tag enumeration failed for {0}: {1}", repositoryName, e.getMessage());
+            }
+            Map<String, ImageDetail> byDigest = new HashMap<>();
+            for (String tag : tags) {
+                try {
+                    RegistryHttpClient.ManifestResult m = http.getManifest(internal, tag, null);
+                    if (m == null) {
+                        failures.add(imageNotFound(tag));
+                        continue;
+                    }
+                    ImageDetail d = m.digest() != null ? byDigest.get(m.digest()) : null;
+                    if (d == null) {
+                        d = imageDetail(repo, repositoryName, region, m);
+                        details.add(d);
+                        if (m.digest() != null) {
+                            byDigest.put(m.digest(), d);
+                        }
+                    }
+                    d.getImageTags().add(tag);
+                } catch (Exception e) {
+                    LOG.warnv("DescribeImages registry call failed for {0}/{1}: {2}", repositoryName, tag, e.getMessage());
+                    failures.add(imageNotFound(tag));
+                }
+            }
+            return new DescribeImagesResult(details, failures);
+        }
+
+        Map<String, List<String>> tagsByDigest = tagsByDigest(internal, http, repositoryName);
+        for (ImageIdentifier id : requested) {
+            String ref = id.getImageTag() != null ? id.getImageTag() : id.getImageDigest();
+            if (ref == null) {
+                continue;
+            }
             try {
                 RegistryHttpClient.ManifestResult m = http.getManifest(internal, ref, null);
                 if (m == null) {
-                    failures.add(new ImageFailure(
-                            new ImageIdentifier(ref.startsWith("sha256:") ? null : ref,
-                                    ref.startsWith("sha256:") ? ref : null),
-                            "ImageNotFound", "Image not found"));
+                    failures.add(imageNotFound(ref));
                     continue;
                 }
-                ImageDetail d = new ImageDetail();
-                d.setRegistryId(repo.getRegistryId());
-                d.setRepositoryName(repositoryName);
-                d.setImageDigest(m.digest());
-                if (!ref.startsWith("sha256:")) {
-                    d.setImageTags(new ArrayList<>(List.of(ref)));
+                ImageDetail d = imageDetail(repo, repositoryName, region, m);
+                if (m.digest() != null) {
+                    d.getImageTags().addAll(tagsByDigest.getOrDefault(m.digest(), List.of()));
                 }
-                d.setImageSizeInBytes(RegistryHttpClient.sizeFromManifest(m.body()));
-                d.setImageManifestMediaType(m.mediaType());
-                d.setArtifactMediaType(RegistryHttpClient.artifactMediaTypeFromManifest(m.body()));
-
-                String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, m.digest());
-                ImageMetadata meta = imageMetaStore.get(metaKey).orElseGet(() -> {
-                    ImageMetadata fresh = new ImageMetadata(m.digest(), Instant.now());
-                    imageMetaStore.put(metaKey, fresh);
-                    return fresh;
-                });
-                d.setImagePushedAt(meta.getPushedAt());
+                if (id.getImageTag() != null && !d.getImageTags().contains(id.getImageTag())) {
+                    d.getImageTags().add(id.getImageTag());
+                }
                 details.add(d);
             } catch (Exception e) {
                 LOG.warnv("DescribeImages registry call failed for {0}/{1}: {2}", repositoryName, ref, e.getMessage());
-                failures.add(new ImageFailure(
-                        new ImageIdentifier(ref.startsWith("sha256:") ? null : ref,
-                                ref.startsWith("sha256:") ? ref : null),
-                        "ImageNotFound", "Image not found"));
+                failures.add(imageNotFound(ref));
             }
         }
         // Real AWS throws ImageNotFoundException when explicit imageIds were passed
         // and NONE of them resolved to an actual image. cdk-assets relies on this
         // exception to decide whether an asset needs to be published.
-        if (explicitRequest && details.isEmpty()) {
+        if (details.isEmpty()) {
             throw new AwsException("ImageNotFoundException",
                     "The image with imageId(s) " + requested + " does not exist within the repository with name '"
                             + repositoryName + "' in the registry with id '" + repo.getRegistryId() + "'", 400);
         }
         return new DescribeImagesResult(details, failures);
+    }
+
+    /** An image's entry, with no tags yet: its digest, size, media types and first push time. */
+    private ImageDetail imageDetail(Repository repo, String repositoryName, String region,
+                                    RegistryHttpClient.ManifestResult m) {
+        ImageDetail d = new ImageDetail();
+        d.setRegistryId(repo.getRegistryId());
+        d.setRepositoryName(repositoryName);
+        d.setImageDigest(m.digest());
+        d.setImageSizeInBytes(RegistryHttpClient.sizeFromManifest(m.body()));
+        d.setImageManifestMediaType(m.mediaType());
+        d.setArtifactMediaType(RegistryHttpClient.artifactMediaTypeFromManifest(m.body()));
+
+        String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, m.digest());
+        ImageMetadata meta = imageMetaStore.get(metaKey).orElseGet(() -> {
+            ImageMetadata fresh = new ImageMetadata(m.digest(), Instant.now());
+            imageMetaStore.put(metaKey, fresh);
+            return fresh;
+        });
+        d.setImagePushedAt(meta.getPushedAt());
+        return d;
+    }
+
+    /**
+     * The repository's tags by the manifest digest each points at, the tags listed once and each
+     * one's digest read once. A registry that cannot list them is logged and answers what was read,
+     * so an image asked for by a tag still carries that tag.
+     */
+    private static Map<String, List<String>> tagsByDigest(String internal, RegistryHttpClient http,
+                                                          String repositoryName) {
+        Map<String, List<String>> byDigest = new HashMap<>();
+        try {
+            for (String tag : http.listTags(internal)) {
+                String digest = http.headManifestDigest(internal, tag, null);
+                if (digest != null) {
+                    byDigest.computeIfAbsent(digest, k -> new ArrayList<>()).add(tag);
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("DescribeImages tag enumeration failed for {0}: {1}", repositoryName, e.getMessage());
+        }
+        return byDigest;
+    }
+
+    private static ImageFailure imageNotFound(String ref) {
+        boolean digest = ref.startsWith("sha256:");
+        return new ImageFailure(new ImageIdentifier(digest ? null : ref, digest ? ref : null),
+                "ImageNotFound", "Image not found");
     }
 
     public BatchGetImageResult batchGetImage(String repositoryName,
