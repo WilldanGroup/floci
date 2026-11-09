@@ -24,7 +24,7 @@
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
 | `ListImages` | Enumerate paginated tags and digests in a repository |
-| `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
+| `DescribeImages` | Image metadata, one entry per image with all its tags: digest, tags, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest; a tag delete removes only that tag |
 | `PutImage` | Write an image manifest under a tag, or under its digest, into the backing registry |
@@ -62,6 +62,13 @@ or change the registry's blob upload behavior.
 when another page remains. Tokens are scoped to the region, registry, and repository;
 local pages use stable tag order. Listing still enumerates tagged images and ignores
 the optional `filter` fields.
+
+`DescribeImages` lists an image once, keyed by its manifest digest, with every tag that
+points at it in `imageTags`: putting an image the repository holds under a new tag adds
+the tag to its entry and no entry. An image asked for in `imageIds`, by a tag or by its
+digest, carries all its tags too, and one no tag points at carries no `imageTags`. An
+untagged image is not listed, since the listing starts from the repository's tags, and
+`maxResults`, `nextToken` and `filter` are not read: the answer is one page, all of it.
 
 ### Admin Endpoints
 
