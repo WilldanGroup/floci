@@ -75,6 +75,7 @@ class CodeBuildServiceRoleDockerIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ADMIN = "test";
     private static final String AWS_CLI = "awscli==1.40.0";
+    private static final int FIRST_COMMAND_RUNS = 5;
     private static final Set<String> NO_KEYS = Set.of(
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
             "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN",
@@ -187,11 +188,43 @@ class CodeBuildServiceRoleDockerIntegrationTest {
                 "the build's relative URI still answers credentials after the build ended");
     }
 
+    /**
+     * The build's very first command reads its session, with one attempt and no retry, as a client that
+     * asks once does: the agent starts no phase before the credentials endpoint answers in the build's
+     * namespace. Several builds in a row, as a race shows only now and then.
+     */
+    @Test
+    void theFirstCommandOfABuildReadsItsRolesSession() throws Exception {
+        String roleArn = iamService.createRole(roleName, "/", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Service":"codebuild.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """, null, 0, null).getArn();
+        createProject(roleArn, """
+                version: 0.2
+                phases:
+                  install:
+                    commands:
+                      - |
+                        python3 -c "import os, urllib.request; print(urllib.request.urlopen('http://169.254.170.2' + os.environ['AWS_CONTAINER_CREDENTIALS_RELATIVE_URI'], timeout=2).status)"
+                """, Map.of("type", "NO_ARTIFACTS"));
+
+        for (int run = 1; run <= FIRST_COMMAND_RUNS; run++) {
+            JsonPath build = awaitBuild(startBuild());
+            int attempt = run;
+            assertEquals("SUCCEEDED", build.getString("buildStatus"),
+                    () -> "build " + attempt + " of " + FIRST_COMMAND_RUNS + ": " + build.getList("phases"));
+        }
+    }
+
     private void createProject(String roleArn) {
+        createProject(roleArn, buildspec(), Map.of("type", "S3", "location", resultsBucket, "packaging", "NONE"));
+    }
+
+    private void createProject(String roleArn, String buildspec, Map<String, String> artifacts) {
         Map<String, Object> project = new HashMap<>();
         project.put("name", projectName);
-        project.put("source", Map.of("type", "NO_SOURCE", "buildspec", buildspec()));
-        project.put("artifacts", Map.of("type", "S3", "location", resultsBucket, "packaging", "NONE"));
+        project.put("source", Map.of("type", "NO_SOURCE", "buildspec", buildspec));
+        project.put("artifacts", artifacts);
         // The Docker host's own architecture, as a build of the other's is refused.
         String host = CodeBuildAgent.normalizeArchitecture(dockerClient.infoCmd().exec().getArchitecture());
         String type = CodeBuildAgent.AARCH64.equals(host) ? "ARM_CONTAINER" : "LINUX_CONTAINER";

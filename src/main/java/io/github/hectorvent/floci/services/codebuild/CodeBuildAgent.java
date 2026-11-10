@@ -66,6 +66,13 @@ final class CodeBuildAgent {
     /** The service of Floci's that serves the build's container the credentials endpoint. */
     static final String RELAY_SERVICE = "credentials";
 
+    /** The name the agent's file gives its own service in the build's container, by a link. */
+    static final String AGENT_HOST = "BMR";
+
+    /** Stands in the generated YAML for compose's own {@code !reset} tag, which the writer cannot emit. */
+    private static final String RESET_LINKS = "floci-reset-links";
+    private static final Pattern RESET_LINKS_LINE = Pattern.compile("(?m)^(\\s*links:) \"?" + RESET_LINKS + "\"?$");
+
     /**
      * Runs the agent's own docker-compose with Floci's file after the agent's, on every call the agent
      * makes ({@code config}, {@code down}, {@code up}), so its validation sees what runs.
@@ -176,12 +183,26 @@ final class CodeBuildAgent {
      * credentials server at {@code host:port}. The build's container reads its session at the address CodeBuild
      * serves it on, and no packet to or from {@code 169.254.0.0/16} crosses the network: a host whose
      * firewall checks the reverse path of bridged traffic drops one, as NixOS's does by default.
+     *
+     * <p>It is healthy once {@code path}, the build's own session, answers through it, and the agent starts
+     * only then: the agent writes what the build's container waits on before its executor runs any phase,
+     * so no command of the build runs before its credentials answer.
      */
-    record CredentialsRelay(String image, String host, int port) {
+    record CredentialsRelay(String image, String host, int port, String path) {
 
         List<String> command() {
             return List.of("ip address add " + CREDENTIALS_ADDRESS + "/32 dev lo && exec socat TCP-LISTEN:80,bind="
                     + CREDENTIALS_ADDRESS + ",fork,reuseaddr TCP:" + host + ":" + port);
+        }
+
+        Map<String, Object> healthcheck() {
+            Map<String, Object> healthcheck = new LinkedHashMap<>();
+            healthcheck.put("test", List.of("CMD", "curl", "-fsS", "-o", "/dev/null",
+                    "http://" + CREDENTIALS_ADDRESS + path));
+            healthcheck.put("interval", "1s");
+            healthcheck.put("timeout", "5s");
+            healthcheck.put("retries", 60);
+            return healthcheck;
         }
     }
 
@@ -223,8 +244,16 @@ final class CodeBuildAgent {
             relay.put("cap_add", List.of("NET_ADMIN"));
             relay.put("entrypoint", List.of("/bin/sh", "-c"));
             relay.put("command", plan.relay().command().stream().map(CodeBuildAgent::literal).toList());
+            relay.put("healthcheck", plan.relay().healthcheck());
             relay.put("labels", literals(plan.labels()));
             services.put(RELAY_SERVICE, relay);
+            // The agent starts once the relay answers. The relay is in the build container's namespace,
+            // so it starts after that container, which the agent's file starts after the agent by its
+            // link to it: the link becomes an alias of the same name on the build's network, which
+            // compose orders nothing by, as a link left in place would be a cycle compose refuses.
+            agent.put("depends_on", Map.of(RELAY_SERVICE, Map.of("condition", "service_healthy")));
+            agent.put("networks", Map.of("default", Map.of("aliases", List.of(AGENT_HOST))));
+            build.put("links", RESET_LINKS);
         }
 
         Map<String, Object> volumeLabels = Map.of("labels", literals(plan.labels()));
@@ -238,7 +267,7 @@ final class CodeBuildAgent {
         plan.network().ifPresent(network -> override.put("networks",
                 Map.of("default", Map.of("name", literal(network), "external", true))));
         try {
-            return YAML.writeValueAsString(override);
+            return RESET_LINKS_LINE.matcher(YAML.writeValueAsString(override)).replaceAll("$1 !reset []");
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not write the agent's compose file", e);
         }
