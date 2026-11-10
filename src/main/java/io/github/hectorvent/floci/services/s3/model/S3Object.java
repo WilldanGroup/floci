@@ -44,6 +44,9 @@ public class S3Object {
     private String objectLockMode;       // "GOVERNANCE" | "COMPLIANCE" | null
     private Instant retainUntilDate;     // null if no retention
     private String legalHoldStatus;      // "ON" | "OFF" | null
+    // x-amz-replication-status: PENDING | COMPLETED | FAILED on a source, REPLICA on a copy, null
+    // where no replication rule applies.
+    private String replicationStatus;
     private String acl;
     private String ownerAccountId;
 
@@ -167,6 +170,9 @@ public class S3Object {
 
     public String getLegalHoldStatus() { return legalHoldStatus; }
     public void setLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; }
+
+    public String getReplicationStatus() { return replicationStatus; }
+    public void setReplicationStatus(String replicationStatus) { this.replicationStatus = replicationStatus; }
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
