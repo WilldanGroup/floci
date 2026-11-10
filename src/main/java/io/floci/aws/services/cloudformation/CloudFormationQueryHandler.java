@@ -876,9 +876,13 @@ public class CloudFormationQueryHandler {
 
     private Response createStackSet(MultivaluedMap<String, String> params) {
         try {
+            String template = cfnService.resolveTemplateBody(params.getFirst("TemplateBody"),
+                    params.getFirst("TemplateURL"));
+            StackSetService.requireTemplateSize(params.getFirst("TemplateBody"), params.getFirst("TemplateURL"),
+                    template);
             StackSet ss = stackSetService.createStackSet(
                     params.getFirst("StackSetName"),
-                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
+                    template,
                     extractParameters(params),
                     extractList(params, "Capabilities.member."),
                     extractTags(params),
@@ -968,9 +972,13 @@ public class CloudFormationQueryHandler {
             StackSet current = stackSetService.describeStackSet(stackSetName);
             Map<String, String> previousParameters =
                     cfnService.parametersWithDefaults(current.getTemplateBody(), current.getParameters());
+            String template = cfnService.resolveTemplateBody(params.getFirst("TemplateBody"),
+                    params.getFirst("TemplateURL"));
+            StackSetService.requireTemplateSize(params.getFirst("TemplateBody"), params.getFirst("TemplateURL"),
+                    template);
             StackSetOperation op = stackSetService.updateStackSet(
                     stackSetName,
-                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
+                    template,
                     extractParameters(params, previousParameters),
                     extractList(params, "Capabilities.member."),
                     extractTags(params),
