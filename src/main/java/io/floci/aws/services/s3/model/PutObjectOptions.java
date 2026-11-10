@@ -9,6 +9,7 @@ public class PutObjectOptions {
     private String objectLockMode;
     private Instant retainUntilDate;
     private String legalHoldStatus;
+    private boolean replica;
     private String contentDisposition;
     private String cacheControl;
     private String serverSideEncryption;
@@ -41,6 +42,10 @@ public class PutObjectOptions {
 
     public String getLegalHoldStatus() { return legalHoldStatus; }
     public PutObjectOptions withLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; return this; }
+
+    /** Whether the object is a replica S3 Replication writes, which is marked REPLICA and replicated no further. */
+    public boolean isReplica() { return replica; }
+    public PutObjectOptions withReplica(boolean replica) { this.replica = replica; return this; }
 
     public String getContentDisposition() { return contentDisposition; }
     public PutObjectOptions withContentDisposition(String contentDisposition) { this.contentDisposition = contentDisposition; return this; }

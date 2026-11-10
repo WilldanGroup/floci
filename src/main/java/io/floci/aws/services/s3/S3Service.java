@@ -90,6 +90,8 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -261,6 +263,16 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
             });
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
+    /**
+     * Copies a new object to the buckets its bucket's replication rules name, one object at a time
+     * in the order they were written, off the request that wrote it, as S3 Replication copies
+     * asynchronously (Amazon S3 User Guide, Replicating objects within and across Regions).
+     */
+    private final ExecutorService replicationExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "s3-replication");
+        thread.setDaemon(true);
+        return thread;
+    });
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
     // security control that LZA applies once per governed account, so it is StorageFactory-backed
@@ -983,6 +995,12 @@ public class S3Service implements Resettable, ResourceProvider {
         object.setAcl(objectAcl);
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
             object.setTags(new HashMap<>(effectiveOptions.getTagging()));
+        }
+        if (effectiveOptions.isReplica()) {
+            object.setReplicationStatus(REPLICATION_REPLICA);
+        } else if (bucket.getReplicationConfiguration() != null
+                && S3ReplicationRules.of(bucket.getReplicationConfiguration()).replicates(key, object.getTags())) {
+            object.setReplicationStatus(REPLICATION_PENDING);
         }
         // Assigned before any metadata publication so persistent and WAL stores retain the same
         // write order used by in-memory promotion. A failed body write may consume a value, which
@@ -6643,9 +6661,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * Stores the bucket replication configuration for round-trip fidelity. The document is
-     * validated minimally (a {@code Role} and at least one {@code Rule} with a
-     * {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
+     * Stores the bucket replication configuration. The document is validated minimally (a
+     * {@code Role} and at least one {@code Rule} with a {@code Destination/Bucket}) and stored
+     * verbatim; each object written after it is copied to the buckets its enabled rules name (see
+     * {@link #replicate}).
      */
     public void putBucketReplication(String bucketName, String replicationXml) {
         mutateBucket(bucketName, bucket -> {
@@ -6712,6 +6731,79 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void deleteBucketReplication(String bucketName) {
         mutateBucket(bucketName, bucket -> bucket.setReplicationConfiguration(null));
+    }
+
+    /** {@code x-amz-replication-status} of a source whose copies are under way. */
+    static final String REPLICATION_PENDING = "PENDING";
+    /** {@code x-amz-replication-status} of a source copied to every destination. */
+    static final String REPLICATION_COMPLETED = "COMPLETED";
+    /** {@code x-amz-replication-status} of a source a destination could not take. */
+    static final String REPLICATION_FAILED = "FAILED";
+    /** {@code x-amz-replication-status} of a copy S3 Replication wrote. */
+    static final String REPLICATION_REPLICA = "REPLICA";
+
+    /**
+     * Copies a new object, written {@code PENDING}, to every bucket its bucket's rules name, off the
+     * request, then marks the source {@code COMPLETED}, or {@code FAILED} where a destination refused
+     * the copy (Amazon S3 User Guide, Getting replication status information). Each copy carries the
+     * version's bytes, metadata and tags and is marked {@code REPLICA}, which no rule of its bucket
+     * replicates again, so two buckets replicating to each other copy each object once. Only a write
+     * reaches here: a delete marker is never replicated, as a rule with
+     * {@code DeleteMarkerReplication} disabled has it.
+     */
+    private void replicate(String bucketName, String key, S3Object written) {
+        AccountAwareStorageBackend.OwnedEntry<Bucket> owned = resolveBucketEntry(bucketName).orElse(null);
+        if (owned == null) {
+            return;
+        }
+        List<S3ReplicationRules.Destination> destinations = S3ReplicationRules
+                .of(owned.value().getReplicationConfiguration()).destinations(key, written.getTags());
+        String account = owned.account();
+        String region = owned.value().getRegion();
+        String versionId = written.getVersionId();
+        String generation = written.getDataGeneration();
+        replicationExecutor.submit(() -> RequestScopes.runAs(account, region,
+                () -> copyToDestinations(bucketName, key, versionId, generation, destinations)));
+    }
+
+    private void copyToDestinations(String bucketName, String key, String versionId, String generation,
+                                    List<S3ReplicationRules.Destination> destinations) {
+        String status = destinations.isEmpty() ? REPLICATION_FAILED : REPLICATION_COMPLETED;
+        for (S3ReplicationRules.Destination destination : destinations) {
+            try {
+                copyObject(bucketName, key, destination.bucket(), key, versionId,
+                        new CopyObjectOptions().withStorageClass(destination.storageClass()).withReplica(true));
+                LOG.debugv("Replicated {0}/{1} to {2}", bucketName, key, destination.bucket());
+            } catch (RuntimeException e) {
+                LOG.warnv("Replication of {0}/{1} to bucket {2} failed: {3}", bucketName, key,
+                        destination.bucket(), e.getMessage());
+                status = REPLICATION_FAILED;
+            }
+        }
+        markReplication(bucketName, key, versionId, generation, status);
+    }
+
+    /** Sets the source version's replication status, unless a later write has taken its place. */
+    private void markReplication(String bucketName, String key, String versionId, String generation, String status) {
+        Bucket bucket = resolveBucket(bucketName).orElse(null);
+        if (bucket == null) {
+            return;
+        }
+        synchronized (bucket) {
+            AccountAwareStorageBackend.OwnedEntry<S3Object> entry;
+            try {
+                entry = getStoredObjectEntry(bucketName, key, versionId);
+            } catch (AwsException gone) {
+                LOG.debugv("{0}/{1} is gone; its replication status {2} is not recorded", bucketName, key, status);
+                return;
+            }
+            S3Object object = entry.value();
+            if (!Objects.equals(generation, object.getDataGeneration())) {
+                return;
+            }
+            object.setReplicationStatus(status);
+            putObjectMetadataForAccount(entry.account(), bucketName, key, object);
+        }
     }
 
     /**
@@ -7119,6 +7211,10 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj,
                                    String sequencer) {
+        if (eventName.startsWith("ObjectCreated") && obj != null
+                && REPLICATION_PENDING.equals(obj.getReplicationStatus())) {
+            replicate(bucketName, key, obj);
+        }
         if (s3UpdatedEvent != null && eventName.startsWith("ObjectCreated")) {
             s3UpdatedEvent.fire(new S3ObjectUpdatedEvent(bucketName, key));
         }
@@ -8455,7 +8551,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         .withChecksumAlgorithm(copyChecksumAlgorithm != null ? copyChecksumAlgorithm.name() : null)
                         .withTagging(effectiveTags)
                         .withIfMatch(effectiveOptions.getIfMatch())
-                        .withIfNoneMatch(effectiveOptions.getIfNoneMatch()),
+                        .withIfNoneMatch(effectiveOptions.getIfNoneMatch())
+                        .withReplica(effectiveOptions.isReplica()),
                 body.eTag());
     }
 

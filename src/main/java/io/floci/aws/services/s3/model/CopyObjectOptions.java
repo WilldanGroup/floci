@@ -31,6 +31,7 @@ public class CopyObjectOptions {
     private String objectLockMode;
     private Instant retainUntilDate;
     private String legalHoldStatus;
+    private boolean replica;
     private String checksumAlgorithm;
     // Whether annotations travel with the copy: COPY (the default) or EXCLUDE.
     private String annotationDirective;
@@ -116,6 +117,10 @@ public class CopyObjectOptions {
 
     public String getLegalHoldStatus() { return legalHoldStatus; }
     public CopyObjectOptions withLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; return this; }
+
+    /** Whether the copy is a replica S3 Replication writes, which is marked REPLICA and replicated no further. */
+    public boolean isReplica() { return replica; }
+    public CopyObjectOptions withReplica(boolean replica) { this.replica = replica; return this; }
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public CopyObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }

@@ -3230,6 +3230,9 @@ public class S3Controller {
         }
         appendLockHeaders(resp, obj);
         appendExpirationHeader(resp, obj);
+        if (obj.getReplicationStatus() != null) {
+            resp.header("x-amz-replication-status", obj.getReplicationStatus());
+        }
     }
 
     private void appendExpirationHeader(Response.ResponseBuilder resp, S3Object obj) {
