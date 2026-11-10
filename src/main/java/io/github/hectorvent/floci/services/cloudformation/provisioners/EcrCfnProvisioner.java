@@ -1,18 +1,21 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ecr.EcrService;
+import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * Provisions {@code AWS::ECR::Repository}.
+ * Provisions {@code AWS::ECR::Repository} and {@code AWS::ECR::ReplicationConfiguration}.
  *
  * <p>A create whose name already belongs to a repository fails, as it does on CloudFormation:
  * {@code RepositoryAlreadyExistsException} propagates and the stack reports the failure instead of
@@ -20,10 +23,16 @@ import java.util.Set;
  * path existed for CDK bootstrap re-runs, but a re-run is an UpdateStack of the existing
  * {@code CDKToolkit} stack, where the prior physical id already equals the fixed repository name
  * and the update path below reconciles it in place.
+ *
+ * <p>A replication configuration is the registry's, one per account and region: the template's
+ * rules replace the registry's on create and update, and a delete clears them. Its {@code Ref} and
+ * {@code Fn::GetAtt RegistryId} are the account id, the registry the configuration belongs to.
  */
 @ApplicationScoped
 public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final String REPOSITORY = "AWS::ECR::Repository";
+    private static final String REPLICATION_CONFIGURATION = "AWS::ECR::ReplicationConfiguration";
     private static final int REPOSITORY_NAME_MAX_LENGTH = 256;
     /** What CreateRepository applies when ImageTagMutability is omitted. */
     private static final String DEFAULT_IMAGE_TAG_MUTABILITY = "MUTABLE";
@@ -36,7 +45,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::ECR::Repository");
+        return Set.of(REPOSITORY, REPLICATION_CONFIGURATION);
     }
 
     @Override
@@ -51,6 +60,15 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        switch (r.getResourceType()) {
+            case REPOSITORY -> provisionRepository(r, props, ctx);
+            case REPLICATION_CONFIGURATION -> provisionReplicationConfiguration(r, props, ctx);
+            default -> throw new IllegalStateException(
+                    "EcrCfnProvisioner cannot provision " + r.getResourceType());
+        }
+    }
+
+    private void provisionRepository(StackResource r, JsonNode props, ProvisionContext ctx) {
         // CDK bootstrap requires lower-case repository names; CFN-generated suffixes can include
         // upper-case characters. Normalize to satisfy the AWS ECR repository name pattern.
         String repoName = ctx.stablePhysicalName(ctx.resolveOptional(props, "RepositoryName"),
@@ -92,8 +110,55 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("RepositoryUri", repo.getRepositoryUri());
     }
 
+    /**
+     * Replaces the registry's replication rules with the template's: each rule's
+     * {@code Destinations}, a {@code Region} and a {@code RegistryId} each, and its optional
+     * {@code RepositoryFilters}, a {@code Filter} and a {@code FilterType} each.
+     */
+    private void provisionReplicationConfiguration(StackResource r, JsonNode props, ProvisionContext ctx) {
+        JsonNode configuration = props == null
+                ? null
+                : ctx.engine().resolveNode(props.get("ReplicationConfiguration"));
+        if (configuration == null || !configuration.path("Rules").isArray()) {
+            throw new AwsException("ValidationError", REPLICATION_CONFIGURATION
+                    + " requires ReplicationConfiguration with a Rules list.", 400);
+        }
+        List<RegistrySettings.ReplicationRule> rules = new ArrayList<>();
+        for (JsonNode rule : configuration.path("Rules")) {
+            List<RegistrySettings.ReplicationDestination> destinations = new ArrayList<>();
+            for (JsonNode destination : rule.path("Destinations")) {
+                String destinationRegion = destination.path("Region").asText(null);
+                String registryId = destination.path("RegistryId").asText(null);
+                if (destinationRegion == null || registryId == null) {
+                    throw new AwsException("ValidationError",
+                            "Every replication destination requires Region and RegistryId.", 400);
+                }
+                destinations.add(new RegistrySettings.ReplicationDestination(destinationRegion, registryId));
+            }
+            if (destinations.isEmpty()) {
+                throw new AwsException("ValidationError", "Every replication rule requires Destinations.", 400);
+            }
+            List<RegistrySettings.RepositoryFilter> filters = null;
+            if (rule.path("RepositoryFilters").isArray()) {
+                filters = new ArrayList<>();
+                for (JsonNode filter : rule.path("RepositoryFilters")) {
+                    filters.add(new RegistrySettings.RepositoryFilter(filter.path("Filter").asText(null),
+                            filter.path("FilterType").asText(null)));
+                }
+            }
+            rules.add(new RegistrySettings.ReplicationRule(destinations, filters));
+        }
+        ecrService.putReplicationConfiguration(rules, ctx.region());
+        r.setPhysicalId(ctx.accountId());
+        r.getAttributes().put("RegistryId", ctx.accountId());
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
+        if (REPLICATION_CONFIGURATION.equals(resourceType)) {
+            ecrService.putReplicationConfiguration(List.of(), region);
+            return;
+        }
         ecrService.deleteRepository(physicalId, null, true, region);
     }
 

@@ -90,6 +90,7 @@ type_order:
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
   AWS::KMS: [Key, ReplicaKey, Alias]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
+  AWS::ECR: [Repository, ReplicationConfiguration]
   AWS::ECS: [Cluster, TaskDefinition, Service]
   AWS::EKS: [Cluster, Nodegroup]
   AWS::RDS:
@@ -187,6 +188,7 @@ notes:
   AWS::SQS::QueuePolicy: accepted; policy not enforced
   AWS::KMS::Key: '`KeyPolicy` and `MultiRegion` are applied; a stack delete leaves the key'
   AWS::KMS::ReplicaKey: 'replicated from the primary `PrimaryKeyArn` names into the stack''s region; a stack delete leaves the replica'
+  AWS::ECR::ReplicationConfiguration: 'the registry''s rules, stored and read back by DescribeRegistry; Floci replicates no image'
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into

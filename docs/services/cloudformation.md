@@ -181,7 +181,7 @@ cross-resource references.
 | SSM | `Parameter` |
 | KMS | `Key` (`KeyPolicy` and `MultiRegion` are applied; a stack delete leaves the key), `ReplicaKey` (replicated from the primary `PrimaryKeyArn` names into the stack's region; a stack delete leaves the replica), `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
-| ECR | `Repository` |
+| ECR | `Repository`, `ReplicationConfiguration` (the registry's rules, stored and read back by DescribeRegistry; Floci replicates no image) |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
