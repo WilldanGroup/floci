@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -59,6 +60,7 @@ class CodeBuildAgentDockerIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String RESOURCE_ID_LABEL = "io.floci.resource-id";
+    private static final String AGENT_RUNNER = "the agent Floci starts";
 
     @Inject
     DockerClient dockerClient;
@@ -132,8 +134,9 @@ class CodeBuildAgentDockerIntegrationTest {
                 """, Map.of("type", "S3", "location", resultsBucket, "packaging", "NONE"));
 
         String buildId = startBuild();
-        Set<String> networks = new LinkedHashSet<>();
-        JsonPath build = awaitBuild(buildId, networks);
+        Map<String, Container> seen = new HashMap<>();
+        JsonPath build = awaitBuild(buildId, seen);
+        Set<String> networks = networksOf(seen);
 
         assertEquals("SUCCEEDED", build.getString("buildStatus"), () -> "phases: " + build.getList("phases"));
         assertTrue(result("shell.txt").startsWith("bash 5"), () -> result("shell.txt"));
@@ -151,7 +154,7 @@ class CodeBuildAgentDockerIntegrationTest {
         createProject(other, "version: 0.2\nphases:\n  build:\n    commands:\n      - echo never\n",
                 Map.of("type", "NO_ARTIFACTS"));
 
-        JsonPath build = awaitBuild(startBuild(), new LinkedHashSet<>());
+        JsonPath build = awaitBuild(startBuild(), new HashMap<>());
 
         assertEquals("FAILED", build.getString("buildStatus"), () -> "phases: " + build.getList("phases"));
         List<String> phaseTypes = build.getList("phases.phaseType");
@@ -161,14 +164,32 @@ class CodeBuildAgentDockerIntegrationTest {
     }
 
     @Test
-    void aBuildLeavesNoContainerVolumeOrWorkingFolderBehind() throws Exception {
+    void everyContainerABuildStartsCarriesTheBuildsIdAndNoneIsLeftOnceItHasEnded() throws Exception {
         createProject(hostEnvironmentType(), "version: 0.2\nphases:\n  build:\n    commands:\n      - echo done\n",
                 Map.of("type", "NO_ARTIFACTS"));
 
         String buildId = startBuild();
-        JsonPath build = awaitBuild(buildId, new LinkedHashSet<>());
+        Map<String, Container> seen = new HashMap<>();
+        JsonPath build = awaitBuild(buildId, seen);
 
         assertEquals("SUCCEEDED", build.getString("buildStatus"), () -> "phases: " + build.getList("phases"));
+        // The agent Floci starts, and the agent, build and credentials relay its docker-compose starts,
+        // the relay where the build's network is user-defined, each found by the build's id alone and
+        // each with Floci's resource namespace and extra labels, as every container Floci starts.
+        Set<String> expected = new TreeSet<>(Set.of(AGENT_RUNNER, "agent", "build"));
+        if (containerDetector.isRunningInContainer() && currentContainerNetworkResolver.resolveNetworkName()
+                .filter(network -> !Set.of("bridge", "default", "host", "none").contains(network)).isPresent()) {
+            expected.add(CodeBuildAgent.RELAY_SERVICE);
+        }
+        assertEquals(expected, new TreeSet<>(seen.values().stream().map(CodeBuildAgentDockerIntegrationTest::role)
+                .toList()));
+        for (Container container : seen.values()) {
+            assertEquals("codebuild", container.getLabels().get("io.floci.service"), () -> role(container));
+            assertEquals(buildId, container.getLabels().get(RESOURCE_ID_LABEL), () -> role(container));
+            assertEquals(Profile.NAMESPACE, container.getLabels().get("floci_namespace"), () -> role(container));
+            assertEquals(Profile.EXTRA_LABEL_VALUE, container.getLabels().get(Profile.EXTRA_LABEL_KEY),
+                    () -> role(container));
+        }
         String label = RESOURCE_ID_LABEL + "=" + buildId;
         assertEquals(List.of(), dockerClient.listContainersCmd().withShowAll(true).withLabelFilter(List.of(label))
                 .exec().stream().map(Container::getNames).toList());
@@ -202,15 +223,14 @@ class CodeBuildAgentDockerIntegrationTest {
                 .then().statusCode(200).extract().jsonPath().getString("build.id");
     }
 
-    /** Polls the build to its end, collecting the networks its agent's containers are on meanwhile. */
-    private JsonPath awaitBuild(String buildId, Set<String> networks) throws InterruptedException {
+    /** Polls the build to its end, collecting the containers labelled with its id meanwhile, by their ids. */
+    private JsonPath awaitBuild(String buildId, Map<String, Container> seen) throws InterruptedException {
         long deadline = System.nanoTime() + Duration.ofMinutes(8).toNanos();
         String label = RESOURCE_ID_LABEL + "=" + buildId;
         while (true) {
-            for (Container container : dockerClient.listContainersCmd().withLabelFilter(List.of(label)).exec()) {
-                if (container.getNetworkSettings() != null && container.getNetworkSettings().getNetworks() != null) {
-                    networks.addAll(container.getNetworkSettings().getNetworks().keySet());
-                }
+            for (Container container : dockerClient.listContainersCmd().withShowAll(true)
+                    .withLabelFilter(List.of(label)).exec()) {
+                seen.put(container.getId(), container);
             }
             JsonPath build = codeBuild("BatchGetBuilds").body(Map.of("ids", List.of(buildId))).post("/")
                     .then().statusCode(200).extract().jsonPath().setRootPath("builds[0]");
@@ -219,6 +239,23 @@ class CodeBuildAgentDockerIntegrationTest {
             }
             Thread.sleep(250);
         }
+    }
+
+    /** The networks the containers are on, a container in another's namespace on none of its own. */
+    private static Set<String> networksOf(Map<String, Container> containers) {
+        Set<String> networks = new LinkedHashSet<>();
+        for (Container container : containers.values()) {
+            if (container.getNetworkSettings() != null && container.getNetworkSettings().getNetworks() != null) {
+                networks.addAll(container.getNetworkSettings().getNetworks().keySet());
+            }
+        }
+        return networks;
+    }
+
+    /** The compose service a container is, or {@link #AGENT_RUNNER} for the agent Floci starts. */
+    private static String role(Container container) {
+        String service = container.getLabels().get("com.docker.compose.service");
+        return service != null ? service : AGENT_RUNNER;
     }
 
     private static RequestSpecification codeBuild(String action) {
@@ -236,10 +273,16 @@ class CodeBuildAgentDockerIntegrationTest {
     public static final class Profile implements QuarkusTestProfile {
         /** Fixed, as the profile and the test class are loaded apart and must name one folder. */
         static final Path WORKSPACE = Path.of("/tmp", "floci-codebuild-agent-test");
+        static final String NAMESPACE = "codebuild-agent-test";
+        static final String EXTRA_LABEL_KEY = "io.floci.test.checkout";
+        static final String EXTRA_LABEL_VALUE = "codebuild-agent-test";
 
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.codebuild.agent-workspace", WORKSPACE.toString());
+            return Map.of("floci.services.codebuild.agent-workspace", WORKSPACE.toString(),
+                    "floci.docker.resource-namespace", NAMESPACE,
+                    "floci.docker.extra-labels[0].key", EXTRA_LABEL_KEY,
+                    "floci.docker.extra-labels[0].value", EXTRA_LABEL_VALUE);
         }
     }
 }
