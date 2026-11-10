@@ -91,6 +91,7 @@ type_order:
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
   AWS::KMS: [Key, Alias]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
+  AWS::ECR: [Repository, ReplicationConfiguration]
   AWS::ECS: [Cluster, TaskDefinition, Service]
   AWS::EKS: [Cluster, Nodegroup]
   AWS::RDS:
@@ -186,6 +187,7 @@ service_labels:
 notes:
   AWS::S3::BucketPolicy: document stored on the bucket; S3 does not evaluate it
   AWS::SQS::QueuePolicy: accepted; policy not enforced
+  AWS::ECR::ReplicationConfiguration: 'the registry''s rules, stored and read back by DescribeRegistry; Floci replicates no image'
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into

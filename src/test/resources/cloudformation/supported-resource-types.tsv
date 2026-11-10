@@ -95,6 +95,7 @@ AWS::EC2::SubnetRouteTableAssociation	Ec2NetworkCfnProvisioner
 AWS::EC2::VPC	Ec2VpcCfnProvisioner
 AWS::EC2::VPCEndpoint	Ec2VpcEndpointCfnProvisioner
 AWS::EC2::VPCGatewayAttachment	Ec2VpcGatewayAttachmentCfnProvisioner
+AWS::ECR::ReplicationConfiguration	EcrCfnProvisioner
 AWS::ECR::Repository	EcrCfnProvisioner
 AWS::ECS::CapacityProvider	EcsCapacityCfnProvisioner
 AWS::ECS::Cluster	EcsCfnProvisioner

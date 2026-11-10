@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.model.RegistrySettings;
 import io.floci.aws.services.ecr.model.Repository;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription;
@@ -29,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -264,6 +266,30 @@ class LeafCfnProvisionerTest {
             repository.setRepositoryArn(arn);
             repository.setRepositoryUri(uri);
             return repository;
+        }
+
+        @Test
+        void replicationConfigurationReplacesTheRegistrysRulesAndIsTheAccountsRegistry() {
+            StackResource r = resource("Replication", "AWS::ECR::ReplicationConfiguration");
+            provisioner.provision(r, props("""
+                    {"ReplicationConfiguration": {"Rules": [{
+                      "Destinations": [{"Region": "us-west-2", "RegistryId": "000000000000"}],
+                      "RepositoryFilters": [{"Filter": "switchboard", "FilterType": "PREFIX_MATCH"}]}]}}
+                    """), ctx);
+
+            assertEquals("000000000000", r.getPhysicalId(), "Ref is the registry id (schema primaryIdentifier)");
+            assertEquals(Map.of("RegistryId", "000000000000"), r.getAttributes());
+            verify(ecr).putReplicationConfiguration(List.of(new RegistrySettings.ReplicationRule(
+                    List.of(new RegistrySettings.ReplicationDestination("us-west-2", "000000000000")),
+                    List.of(new RegistrySettings.RepositoryFilter("switchboard", "PREFIX_MATCH")))), REGION);
+        }
+
+        @Test
+        void deletingTheReplicationConfigurationClearsTheRegistrysRules() {
+            provisioner.delete("AWS::ECR::ReplicationConfiguration", "000000000000", REGION);
+
+            verify(ecr).putReplicationConfiguration(List.of(), REGION);
+            verify(ecr, never()).deleteRepository(any(), any(), anyBoolean(), any());
         }
 
         @Test
