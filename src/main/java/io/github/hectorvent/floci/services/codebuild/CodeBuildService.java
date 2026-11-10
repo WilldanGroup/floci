@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.BuildPhase;
+import io.github.hectorvent.floci.services.codebuild.model.Fleet;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectArtifacts;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectEnvironment;
@@ -30,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -37,11 +39,14 @@ public class CodeBuildService {
 
     private static final int LIST_PROJECTS_PAGE_SIZE = 100;
     private static final int LIST_BUILDS_PAGE_SIZE = 100;
+    private static final Pattern FLEET_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9\\-_]{1,127}");
 
     // key: region -> name -> project
     private Map<String, Map<String, Project>> projects = new ConcurrentHashMap<>();
     // key: region -> arn -> report group
     private Map<String, Map<String, ReportGroup>> reportGroups = new ConcurrentHashMap<>();
+    // key: region -> arn -> compute fleet
+    private Map<String, Map<String, Fleet>> fleets = new ConcurrentHashMap<>();
     // key: region -> arn -> source credential (token is stored but never returned)
     private Map<String, Map<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
     // key: account:region -> buildId -> build (transient: builds are runtime state)
@@ -75,11 +80,14 @@ public class CodeBuildService {
                 new TypeReference<Map<String, Map<String, ReportGroup>>>() {});
         this.sourceCredentials = storageBacked("codebuild-source-credentials.json",
                 new TypeReference<Map<String, Map<String, SourceCredential>>>() {});
+        this.fleets = storageBacked("codebuild-fleets.json",
+                new TypeReference<Map<String, Map<String, Fleet>>>() {});
         this.persistedBuildCounters = storageBacked("codebuild-build-counters.json",
                 new TypeReference<Map<String, Long>>() {});
         normalizeRegionMaps(projects);
         normalizeRegionMaps(reportGroups);
         normalizeRegionMaps(sourceCredentials);
+        normalizeRegionMaps(fleets);
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
@@ -111,6 +119,10 @@ public class CodeBuildService {
 
     private Map<String, ReportGroup> reportGroupsFor(String region) {
         return reportGroups.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, Fleet> fleetsFor(String region) {
+        return fleets.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
     private Map<String, SourceCredential> sourceCredentialsFor(String region) {
@@ -448,6 +460,138 @@ public class CodeBuildService {
     }
 
     private record ListSortKey(Double created, Double lastModified, String name, String id) {
+    }
+
+    // ---- Compute Fleets ----
+
+    /**
+     * Records a compute fleet. Floci runs no reserved capacity: a fleet is ACTIVE at once and a
+     * project that names it in {@code environment.fleet.fleetArn} builds as an on-demand one does.
+     * The ARN is {@code fleet/<name>:<id>}, the Service Authorization Reference's form for the
+     * resource type, and {@code id} is {@code <name>:<uuid>}, the part after {@code fleet/}, the
+     * way a build's id is its project's name and a uuid.
+     */
+    public Fleet createFleet(String region, String account, Fleet request) {
+        String name = request.getName();
+        if (name == null || !FLEET_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidInputException",
+                    "name must be 2-128 characters matching [A-Za-z0-9][A-Za-z0-9-_]{1,127}", 400);
+        }
+        if (findFleet(region, account, name) != null) {
+            throw new AwsException("ResourceAlreadyExistsException", "Fleet already exists: " + name, 400);
+        }
+        if (request.getBaseCapacity() == null || request.getBaseCapacity() < 1) {
+            throw new AwsException("InvalidInputException", "baseCapacity must be at least 1", 400);
+        }
+        if (request.getEnvironmentType() == null || request.getEnvironmentType().isBlank()) {
+            throw new AwsException("InvalidInputException", "environmentType is required", 400);
+        }
+        if (request.getComputeType() == null || request.getComputeType().isBlank()) {
+            throw new AwsException("InvalidInputException", "computeType is required", 400);
+        }
+        double now = Instant.now().toEpochMilli() / 1000.0;
+        String id = name + ":" + UUID.randomUUID();
+        request.setId(id);
+        request.setArn(AwsArnUtils.Arn.of("codebuild", region, account, "fleet/" + id).toString());
+        request.setCreated(now);
+        request.setLastModified(now);
+        request.setStatus(Map.of("statusCode", "ACTIVE"));
+        fleetsFor(region).put(request.getArn(), request);
+        persistRegion(fleets, region);
+        return request;
+    }
+
+    /** Applies the fields the request gives to the fleet its ARN names; the rest keep their values. */
+    public Fleet updateFleet(String region, String account, String arn, Fleet changes) {
+        Fleet fleet = requireFleet(region, account, arn);
+        if (changes.getBaseCapacity() != null) {
+            if (changes.getBaseCapacity() < 1) {
+                throw new AwsException("InvalidInputException", "baseCapacity must be at least 1", 400);
+            }
+            fleet.setBaseCapacity(changes.getBaseCapacity());
+        }
+        if (changes.getEnvironmentType() != null) { fleet.setEnvironmentType(changes.getEnvironmentType()); }
+        if (changes.getComputeType() != null) { fleet.setComputeType(changes.getComputeType()); }
+        if (changes.getComputeConfiguration() != null) {
+            fleet.setComputeConfiguration(changes.getComputeConfiguration());
+        }
+        if (changes.getScalingConfiguration() != null) {
+            fleet.setScalingConfiguration(changes.getScalingConfiguration());
+        }
+        if (changes.getOverflowBehavior() != null) { fleet.setOverflowBehavior(changes.getOverflowBehavior()); }
+        if (changes.getVpcConfig() != null) { fleet.setVpcConfig(changes.getVpcConfig()); }
+        if (changes.getProxyConfiguration() != null) {
+            fleet.setProxyConfiguration(changes.getProxyConfiguration());
+        }
+        if (changes.getImageId() != null) { fleet.setImageId(changes.getImageId()); }
+        if (changes.getFleetServiceRole() != null) { fleet.setFleetServiceRole(changes.getFleetServiceRole()); }
+        if (changes.getTags() != null) { fleet.setTags(changes.getTags()); }
+        fleet.setLastModified(Instant.now().toEpochMilli() / 1000.0);
+        persistRegion(fleets, region);
+        return fleet;
+    }
+
+    public void deleteFleet(String region, String account, String arn) {
+        Fleet fleet = requireFleet(region, account, arn);
+        fleetsFor(region).remove(fleet.getArn());
+        persistRegion(fleets, region);
+    }
+
+    /** The fleets named by name or ARN, in the order asked, each once it is found. */
+    public List<Fleet> batchGetFleets(String region, String account, List<String> namesOrArns) {
+        List<Fleet> found = new ArrayList<>();
+        for (String identifier : namesOrArns) {
+            Fleet fleet = findFleet(region, account, identifier);
+            if (fleet != null && !found.contains(fleet)) {
+                found.add(fleet);
+            }
+        }
+        return found;
+    }
+
+    public FleetPage listFleetsPage(String region, String account, String sortBy, String sortOrder,
+                                    int maxResults, String nextToken) {
+        if (maxResults < 1 || maxResults > 100) {
+            throw new AwsException("InvalidInputException", "maxResults must be between 1 and 100", 400);
+        }
+        String criterion = sortBy == null ? "NAME" : sortBy;
+        String order = sortOrder == null ? "ASCENDING" : sortOrder;
+        List<ListSortKey> keys = fleetsFor(region).values().stream()
+                .filter(fleet -> account.equals(AwsArnUtils.parse(fleet.getArn()).accountId()))
+                .map(fleet -> new ListSortKey(fleet.getCreated(), fleet.getLastModified(), fleet.getName(),
+                        fleet.getArn()))
+                .toList();
+        CodeBuildPagination.Page<ListSortKey> page = paginateList(keys, region, criterion, order, maxResults,
+                nextToken, "ListFleets", "lastArn");
+        return new FleetPage(page.items().stream().map(ListSortKey::name).toList(), page.nextToken());
+    }
+
+    public record FleetPage(List<String> fleets, String nextToken) {
+    }
+
+    private Fleet requireFleet(String region, String account, String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("InvalidInputException", "arn is required", 400);
+        }
+        Fleet fleet = findFleet(region, account, arn);
+        if (fleet == null) {
+            throw new AwsException("ResourceNotFoundException", "Fleet not found: " + arn, 400);
+        }
+        return fleet;
+    }
+
+    /** The account's fleet in {@code region} with this ARN or this name, or null. */
+    private Fleet findFleet(String region, String account, String nameOrArn) {
+        Map<String, Fleet> store = fleetsFor(region);
+        Fleet byArn = store.get(nameOrArn);
+        if (byArn != null) {
+            return byArn;
+        }
+        return store.values().stream()
+                .filter(fleet -> nameOrArn.equals(fleet.getName())
+                        && account.equals(AwsArnUtils.parse(fleet.getArn()).accountId()))
+                .findFirst()
+                .orElse(null);
     }
 
     // ---- Source Credentials ----

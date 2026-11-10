@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.BuildPage;
+import io.github.hectorvent.floci.services.codebuild.CodeBuildService.FleetPage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ProjectPage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ReportGroupPage;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
+import io.github.hectorvent.floci.services.codebuild.model.Fleet;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectArtifacts;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectEnvironment;
@@ -47,6 +49,11 @@ public class CodeBuildJsonHandler {
             case "DeleteReportGroup" -> deleteReportGroup(request, region);
             case "BatchGetReportGroups" -> batchGetReportGroups(request, region);
             case "ListReportGroups" -> listReportGroups(request, region);
+            case "CreateFleet" -> createFleet(request, region, account);
+            case "UpdateFleet" -> updateFleet(request, region, account);
+            case "DeleteFleet" -> deleteFleet(request, region, account);
+            case "BatchGetFleets" -> batchGetFleets(request, region, account);
+            case "ListFleets" -> listFleets(request, region, account);
             case "ImportSourceCredentials" -> importSourceCredentials(request, region, account);
             case "ListSourceCredentials" -> listSourceCredentials(region);
             case "DeleteSourceCredentials" -> deleteSourceCredentials(request, region);
@@ -199,6 +206,68 @@ public class CodeBuildJsonHandler {
             result.put("nextToken", page.nextToken());
         }
         return Response.ok(result).build();
+    }
+
+    private Response createFleet(JsonNode req, String region, String account) throws Exception {
+        Fleet fleet = service.createFleet(region, account, fleetRequest(req));
+        return Response.ok(Map.of("fleet", fleet)).build();
+    }
+
+    private Response updateFleet(JsonNode req, String region, String account) throws Exception {
+        Fleet fleet = service.updateFleet(region, account, req.path("arn").asText(null), fleetRequest(req));
+        return Response.ok(Map.of("fleet", fleet)).build();
+    }
+
+    private Response deleteFleet(JsonNode req, String region, String account) {
+        service.deleteFleet(region, account, req.path("arn").asText(null));
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response batchGetFleets(JsonNode req, String region, String account) {
+        List<String> names = new ArrayList<>();
+        req.path("names").forEach(n -> names.add(n.asText()));
+        List<Fleet> found = service.batchGetFleets(region, account, names);
+        List<String> foundIdentifiers = found.stream()
+                .flatMap(fleet -> Stream.of(fleet.getName(), fleet.getArn()))
+                .toList();
+        List<String> notFound = names.stream().filter(n -> !foundIdentifiers.contains(n)).toList();
+        return Response.ok(Map.of("fleets", found, "fleetsNotFound", notFound)).build();
+    }
+
+    private Response listFleets(JsonNode req, String region, String account) {
+        JsonNode sizeNode = req.get("maxResults");
+        if (sizeNode != null && (!sizeNode.isIntegralNumber() || !sizeNode.canConvertToInt())) {
+            throw new AwsException("InvalidInputException", "Invalid maxResults", 400);
+        }
+        JsonNode tokenNode = req.get("nextToken");
+        if (tokenNode != null && !tokenNode.isTextual()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        FleetPage page = service.listFleetsPage(region, account,
+                req.path("sortBy").asText(null), req.path("sortOrder").asText(null),
+                sizeNode == null ? 100 : sizeNode.intValue(), tokenNode == null ? null : tokenNode.asText());
+        Map<String, Object> result = new HashMap<>();
+        result.put("fleets", page.fleets());
+        if (page.nextToken() != null) {
+            result.put("nextToken", page.nextToken());
+        }
+        return Response.ok(result).build();
+    }
+
+    /**
+     * The fleet a CreateFleet or UpdateFleet request describes. Its members carry the
+     * {@code Fleet} data type's names, so the request maps onto the model whole; {@code arn},
+     * {@code id}, the times and the status are the service's to set and are dropped here.
+     */
+    private Fleet fleetRequest(JsonNode req) throws Exception {
+        Fleet fleet = mapper.treeToValue(req, Fleet.class);
+        fleet.setArn(null);
+        fleet.setId(null);
+        fleet.setCreated(null);
+        fleet.setLastModified(null);
+        fleet.setStatus(null);
+        fleet.setTags(parseTags(req));
+        return fleet;
     }
 
     private Response importSourceCredentials(JsonNode req, String region, String account) {
