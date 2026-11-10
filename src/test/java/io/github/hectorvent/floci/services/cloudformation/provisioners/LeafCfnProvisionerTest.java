@@ -87,7 +87,8 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-123");
             key.setArn("arn:aws:kms:us-east-1:000000000000:key/k-123");
-            when(kms.createKey(eq("a key"), eq(null), any(), eq(REGION))).thenReturn(key);
+            when(kms.createKey(eq("a key"), eq(null), eq("SYMMETRIC_DEFAULT"), eq(null), any(), eq(null), eq(false),
+                    eq(REGION))).thenReturn(key);
 
             StackResource r = resource("Key", "AWS::KMS::Key");
             provisioner.provision(r, props("""
@@ -105,7 +106,8 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-1");
             ArgumentCaptor<Map<String, String>> tags = ArgumentCaptor.forClass(Map.class);
-            when(kms.createKey(any(), any(), tags.capture(), anyString())).thenReturn(key);
+            when(kms.createKey(any(), any(), any(), any(), tags.capture(), any(), eq(false), anyString()))
+                    .thenReturn(key);
 
             provisioner.provision(resource("Key", "AWS::KMS::Key"), props("""
                     {"Tags": [{"Key": "team", "Value": "core"}]}
