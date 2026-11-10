@@ -26,6 +26,8 @@ AWS::AppConfig::DeploymentStrategy	Id	DeploymentDurationInMinutes,Description,Fi
 AWS::AppConfig::Environment	EnvironmentId	ApplicationId,DeletionProtectionCheck,Description,Monitors,Name,Tags
 AWS::AppSync::ApiKey	ApiKey,ApiKeyId,Arn	ApiId,Description,Expires
 AWS::AppSync::DataSource	DataSourceArn	ApiId,Description,DynamoDBConfig,EventBridgeConfig,HttpConfig,LambdaConfig,MetricsConfig,Name,OpenSearchServiceConfig,RelationalDatabaseConfig,ServiceRoleArn,Type
+AWS::AppSync::DomainName	AppSyncDomainName,DomainNameArn,HostedZoneId	CertificateArn,Description,DomainName,Tags
+AWS::AppSync::DomainNameApiAssociation	ApiAssociationIdentifier	ApiId,DomainName
 AWS::AppSync::FunctionConfiguration	FunctionArn,FunctionId	ApiId,Code,CodeS3Location,DataSourceName,Description,FunctionVersion,MaxBatchSize,Name,RequestMappingTemplate,RequestMappingTemplateS3Location,ResponseMappingTemplate,ResponseMappingTemplateS3Location,Runtime,SyncConfig
 AWS::AppSync::GraphQLApi	ApiId,Arn,GraphQLDns,GraphQLEndpointArn,GraphQLUrl,RealtimeDns,RealtimeUrl	AdditionalAuthenticationProviders,ApiType,AuthenticationType,EnhancedMetricsConfig,EnvironmentVariables,IntrospectionConfig,LambdaAuthorizerConfig,LogConfig,MergedApiExecutionRoleArn,Name,OpenIDConnectConfig,OwnerContact,QueryDepthLimit,ResolverCountLimit,Tags,UserPoolConfig,Visibility,XrayEnabled
 AWS::AppSync::GraphQLSchema	Id	ApiId,Definition,DefinitionS3Location

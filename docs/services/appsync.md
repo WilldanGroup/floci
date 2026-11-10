@@ -513,6 +513,8 @@ Floci provisions these AppSync resource types:
 | `AWS::AppSync::FunctionConfiguration` | the function ARN | `FunctionArn`, `FunctionId`, `Name`, `DataSourceName` |
 | `AWS::AppSync::Resolver` | the resolver ARN | `ResolverArn`, `TypeName`, `FieldName` |
 | `AWS::AppSync::ApiKey` | the key id, `da2-...` (AWS: the key ARN) | `ApiKey`, `ApiKeyId`, `Arn` |
+| `AWS::AppSync::DomainName` | the domain name | `DomainName`, `DomainNameArn`, `AppSyncDomainName`, `HostedZoneId` |
+| `AWS::AppSync::DomainNameApiAssociation` | `<DomainNameArn>/apiassociation` | `ApiAssociationIdentifier` |
 
 `GraphQLEndpointArn` returns
 `arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<apiId>`. Use it to
@@ -549,8 +551,16 @@ A `GraphQLSchema` with `DefinitionS3Location` and no inline `Definition`, and `C
 a `Resolver` or `FunctionConfiguration`, fail the resource with `ValidationError`. Give the schema
 inline in `Definition` and the code inline in `Code`.
 
-`AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `DomainName`, `DomainNameApiAssociation`,
-`SourceApiAssociation` and `Type` are not provisioned. By default such a resource is stubbed: it
+A `DomainName` is fronted as AppSync fronts one, by a CloudFront distribution name in CloudFront's
+hosted zone, `AppSyncDomainName` and `HostedZoneId`. Its `DomainName` and `CertificateArn` are
+createOnly: a new name stands a new domain name and the old one is deleted once the update commits,
+and a new certificate under the same name is refused. The reference page for
+`DomainNameApiAssociation` gives no return values; its registry schema's primary identifier,
+`ApiAssociationIdentifier`, is the domain name's ARN followed by `/apiassociation` on Floci, which
+has not been read on AWS. A new `ApiId` moves the association in place.
+
+`AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `SourceApiAssociation` and `Type` are not
+provisioned. By default such a resource is stubbed: it
 reaches `CREATE_COMPLETE` and nothing is created for it. Set
 `allow-stub-unsupported-resource-types` to `false` to fail it instead, see
 [CloudFormation](cloudformation.md#supported-resource-types).

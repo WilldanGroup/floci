@@ -791,6 +791,13 @@ public class AppSyncService {
         DomainName existing = getDomainName(domainName);
         associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
+        // UpdateDomainName takes no tags; CloudFormation's update of AWS::AppSync::DomainName
+        // drives them to the template's set through here.
+        if (request.get("tags") instanceof Map<?, ?> tagMap) {
+            Map<String, String> tagStrings = new HashMap<>();
+            tagMap.forEach((k, v) -> tagStrings.put(String.valueOf(k), String.valueOf(v)));
+            existing.setTags(tagStrings);
+        }
         domainStore.put(domainName, existing);
         return existing;
     }

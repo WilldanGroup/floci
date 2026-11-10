@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.appsync.AppSyncService;
 import io.floci.aws.services.appsync.model.ApiKey;
 import io.floci.aws.services.appsync.model.DataSource;
+import io.floci.aws.services.appsync.model.DomainName;
 import io.floci.aws.services.appsync.model.FunctionConfiguration;
 import io.floci.aws.services.appsync.model.GraphqlApi;
 import io.floci.aws.services.appsync.model.Resolver;
@@ -23,6 +24,7 @@ import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -84,6 +86,10 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private static final String FUNCTION_CONFIGURATION = "AWS::AppSync::FunctionConfiguration";
     private static final String RESOLVER = "AWS::AppSync::Resolver";
     private static final String API_KEY = "AWS::AppSync::ApiKey";
+    private static final String DOMAIN_NAME = "AWS::AppSync::DomainName";
+    private static final String DOMAIN_NAME_API_ASSOCIATION = "AWS::AppSync::DomainNameApiAssociation";
+    /** What follows a domain name's ARN in its association's identifier. */
+    private static final String API_ASSOCIATION_SUFFIX = "/apiassociation";
 
     /** The service's own "already gone", tolerated on delete and nothing else. */
     private static final String NOT_FOUND = "NotFoundException";
@@ -170,7 +176,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY);
+        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY,
+                DOMAIN_NAME, DOMAIN_NAME_API_ASSOCIATION);
     }
 
     @Override
@@ -184,6 +191,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             case FUNCTION_CONFIGURATION -> provisionFunction(r, props, ctx);
             case RESOLVER -> provisionResolver(r, props, ctx);
             case API_KEY -> provisionApiKey(r, props, ctx);
+            case DOMAIN_NAME -> provisionDomainName(r, props, ctx);
+            case DOMAIN_NAME_API_ASSOCIATION -> provisionDomainNameApiAssociation(r, props, ctx);
             default -> throw new IllegalStateException(
                     "AppSyncCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -257,6 +266,110 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         if (!blank(realtimeUrl)) {
             r.getAttributes().put("RealtimeUrl", realtimeUrl);
             r.getAttributes().put("RealtimeDns", host(realtimeUrl));
+        }
+    }
+
+    // ── DomainName and its API association ───────────────────────────────────
+
+    /**
+     * A custom domain name: {@code Ref} is the name, and {@code Fn::GetAtt} gives {@code DomainName},
+     * {@code DomainNameArn}, and the CloudFront distribution name and hosted zone AppSync fronts it
+     * with, {@code AppSyncDomainName} and {@code HostedZoneId}. {@code DomainName} and
+     * {@code CertificateArn} are createOnly; a certificate change under the same name is refused,
+     * since the replacement could not stand beside the domain it replaces.
+     */
+    private void provisionDomainName(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        String domainName = ctx.resolveOptional(props, "DomainName");
+        String certificateArn = ctx.resolveOptional(props, "CertificateArn");
+        if (blank(domainName) || blank(certificateArn)) {
+            throw new AwsException("ValidationError",
+                    DOMAIN_NAME + " requires DomainName and CertificateArn.", 400);
+        }
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("domainName", domainName);
+        req.put("certificateArn", certificateArn);
+        req.put("description", ctx.resolveOptional(props, "Description"));
+        req.put("tags", ctx.resolveTags(props, "Tags"));
+
+        DomainName dn;
+        if (ctx.reusesPriorEntity(domainName)) {
+            dn = appSyncService.getDomainName(domainName);
+            if (!certificateArn.equals(dn.getCertificateArn())) {
+                throw new AwsException("ValidationError", "Updating CertificateArn of domain name " + domainName
+                        + " requires replacement, which a custom-named domain name cannot take.", 400);
+            }
+            dn = appSyncService.updateDomainName(domainName, req);
+        } else {
+            dn = appSyncService.createDomainName(req);
+        }
+
+        r.setPhysicalId(dn.getDomainName());
+        r.getAttributes().put("DomainName", dn.getDomainName());
+        r.getAttributes().put("DomainNameArn", dn.getDomainNameArn());
+        r.getAttributes().put("AppSyncDomainName", dn.getAppsyncDomainName());
+        r.getAttributes().put("HostedZoneId", dn.getHostedZoneId());
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * Associates the API with the domain name. The type's reference page gives no return values; its
+     * registry schema's primary identifier, {@code ApiAssociationIdentifier}, is
+     * {@code <domain name ARN>/apiassociation} here, the domain name's ARN and the path AppSync
+     * serves the association at, so {@code Ref} and {@code Fn::GetAtt ApiAssociationIdentifier}
+     * answer it. {@code ApiId} updates in place by moving the association; a new
+     * {@code DomainName} associates the new domain and the old association is removed once the
+     * update commits.
+     */
+    private void provisionDomainNameApiAssociation(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        String domainName = ctx.resolveOptional(props, "DomainName");
+        String apiId = ctx.resolveOptional(props, "ApiId");
+        if (blank(domainName) || blank(apiId)) {
+            throw new AwsException("ValidationError",
+                    DOMAIN_NAME_API_ASSOCIATION + " requires DomainName and ApiId.", 400);
+        }
+        String identifier = appSyncService.getDomainName(domainName).getDomainNameArn() + API_ASSOCIATION_SUFFIX;
+        if (ctx.reusesPriorEntity(identifier)) {
+            if (!apiId.equals(appSyncService.getApiAssociation(domainName).getApiId())) {
+                appSyncService.disassociateApi(domainName);
+                appSyncService.associateApi(domainName, apiId);
+            }
+        } else {
+            appSyncService.associateApi(domainName, apiId);
+        }
+
+        r.setPhysicalId(identifier);
+        r.getAttributes().put("ApiAssociationIdentifier", identifier);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return isDomainType(resource) && ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return isDomainType(resource) ? ReplacementCleanup.cleanupPhysicalId(resource) : null;
+    }
+
+    private static boolean isDomainType(StackResource resource) {
+        return DOMAIN_NAME.equals(resource.getResourceType())
+                || DOMAIN_NAME_API_ASSOCIATION.equals(resource.getResourceType());
+    }
+
+    /** Deletes a domain name, or the association an identifier names, tolerating one already gone. */
+    private void deleteDomainResource(String resourceType, String physicalId, String region) {
+        if (DOMAIN_NAME.equals(resourceType)) {
+            CfnDeletes.safeDelete("AppSync domain name", physicalId,
+                    () -> appSyncService.deleteDomainName(physicalId), NOT_FOUND);
+        } else {
+            String resource = AwsArnUtils.parse(physicalId).resource();
+            String domainName = resource.substring("domainnames/".length(),
+                    resource.length() - API_ASSOCIATION_SUFFIX.length());
+            CfnDeletes.safeDelete("AppSync domain name API association", physicalId,
+                    () -> appSyncService.disassociateApi(domainName), NOT_FOUND);
         }
     }
 
@@ -464,6 +577,9 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if (isDomainType(resource)) {
+            return ReplacementCleanup.rollback(resource, this::deleteDomainResource);
+        }
         if (!resource.getAttributes().containsKey(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR)) {
             return false;
         }
@@ -486,12 +602,19 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if (isDomainType(resource)) {
+            return ReplacementCleanup.complete(resource, this::deleteDomainResource);
+        }
         resource.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
         return UpdateCleanupResult.notApplicable();
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        if (isDomainType(resource)) {
+            ReplacementCleanup.clear(resource);
+            return;
+        }
         resource.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
     }
 
@@ -627,6 +750,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                             fieldName));
             case API_KEY -> deleteChild(r, apiId, "API key", physicalId,
                     keyId -> appSyncService.deleteApiKey(apiId, keyId));
+            case DOMAIN_NAME, DOMAIN_NAME_API_ASSOCIATION ->
+                    deleteDomainResource(r.getResourceType(), physicalId, region);
             default -> LOG.warnv("No delete implemented for {0}", r.getResourceType());
         }
     }
