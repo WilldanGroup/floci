@@ -79,6 +79,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
     private final ContainerReachableEndpoint containerEndpoint;
+    private final CodeBuildEventPublisher events;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -94,7 +95,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
-                           ContainerReachableEndpoint containerEndpoint) {
+                           ContainerReachableEndpoint containerEndpoint,
+                           CodeBuildEventPublisher events) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -106,6 +108,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
         this.containerEndpoint = containerEndpoint;
+        this.events = events;
     }
 
     /**
@@ -149,8 +152,22 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
+    /**
+     * Runs one build. Its state changes go to the default event bus as it starts and once it has ended,
+     * after its container is gone, so a reader the end wakes finds the build ended.
+     */
     private void runBuild(String region, Build build, Project project,
                           String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
+        events.buildStateChanged(build, project, "IN_PROGRESS");
+        try {
+            executeBuild(region, build, project, buildspecOverride, stopFlag, executionId);
+        } finally {
+            events.buildStateChanged(build, project, build.getBuildStatus());
+        }
+    }
+
+    private void executeBuild(String region, Build build, Project project,
+                              String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
         String buildId = build.getId();
         Path workspace = null;
         String containerId = null;

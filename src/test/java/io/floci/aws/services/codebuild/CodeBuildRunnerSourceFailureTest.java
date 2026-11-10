@@ -104,7 +104,8 @@ class CodeBuildRunnerSourceFailureTest {
         when(endpoint.port()).thenReturn(4566);
 
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint));
+                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint,
+                mock(CodeBuildEventPublisher.class)));
         doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
                 .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
 

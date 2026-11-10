@@ -72,6 +72,10 @@ Each `StartBuild` call:
 
 Source injection and artifact extraction both use the Docker API's archive copy endpoints — no bind mounts are required. This works correctly when Floci itself runs inside a Docker container (Docker-in-Docker).
 
+## Build State Change Events
+
+As a build starts and once it has ended, Floci puts a `CodeBuild Build State Change` event, source `aws.codebuild`, on the default event bus of the build's account and Region, as CodeBuild does ("Build notifications input format reference", AWS CodeBuild User Guide): `build-status` `IN_PROGRESS`, then `SUCCEEDED`, `FAILED`, `FAULT` or `STOPPED`, with `build-id` (the build's ARN), `project-name`, `current-phase` and `additional-information`: the environment, the timeout, `build-complete`, the initiator, the start time, the source, the log group and stream, and the phases so far, times in CodeBuild's `Sep 1, 2017 4:12:29 PM` form. The event's `resources` hold the build's ARN. The end's event goes out once the build reads complete and its container is gone, so a rule's target that reads the build finds it ended. Not sent: `artifact` and the logs' `deep-link`, and `CodeBuild Build Phase Change` events.
+
 ## Buildspec Support
 
 Floci parses the `buildspec.yml` embedded in the project or provided via `buildspecOverride`. Supported fields:
