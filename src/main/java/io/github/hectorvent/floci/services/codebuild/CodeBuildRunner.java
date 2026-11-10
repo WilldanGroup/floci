@@ -28,10 +28,6 @@ import io.github.hectorvent.floci.services.codebuild.model.BuildPhase;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
-import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import io.github.hectorvent.floci.services.ssm.SsmService;
-import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -76,14 +72,15 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final int STOP_TIMEOUT_SECONDS = 5;
     private static final String HELPER_IMAGE = "floci/network-helper:local";
     private static final String HELPER_DOCKERFILE = "/docker/network-helper.Dockerfile";
+    /** The status code CodeBuild's agent gives a variable it cannot resolve. */
+    private static final String VARIABLES_ERROR = "Decrypted Variables Error";
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
     private final S3Service s3Service;
-    private final SsmService ssmService;
-    private final SecretsManagerService secretsManagerService;
+    private final CodeBuildVariables variables;
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
@@ -101,8 +98,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                            ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer,
                            S3Service s3Service,
-                           SsmService ssmService,
-                           SecretsManagerService secretsManagerService,
+                           CodeBuildVariables variables,
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
@@ -114,8 +110,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.s3Service = s3Service;
-        this.ssmService = ssmService;
-        this.secretsManagerService = secretsManagerService;
+        this.variables = variables;
         this.config = config;
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
@@ -293,6 +288,23 @@ public class CodeBuildRunner implements ContainerTeardown {
         String account = accountOf(project);
         logStreamer.ensureLogGroupAndStreamForAccount(account, logGroup, logStream, region);
 
+        // Each Parameter Store and Secrets Manager variable, read as the project's role before the
+        // agent starts: one it may not read, or that does not stand, fails DOWNLOAD_SOURCE as the
+        // agent fails it.
+        Map<String, String> declared;
+        try {
+            declared = variables.resolve(declaredVariables(build, project, buildspec), new CodeBuildVariables.Reader(
+                    project.getServiceRole(), CodeBuildRoleCredentials.sessionArn(project.getServiceRole(), buildId,
+                    account, region), account, region));
+        } catch (CodeBuildVariables.Refused refused) {
+            completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", VARIABLES_ERROR, refused.getMessage());
+            logStreamer.streamToCloudWatchLogsForAccount(account, logGroup, logStream, region,
+                    "Phase complete: DOWNLOAD_SOURCE State: FAILED");
+            logStreamer.streamToCloudWatchLogsForAccount(account, logGroup, logStream, region,
+                    "Phase context status code: " + VARIABLES_ERROR + " Message: " + refused.getMessage());
+            return "FAILED";
+        }
+
         String image = build.getEnvironment() != null && build.getEnvironment().getImage() != null
                 ? build.getEnvironment().getImage()
                 : project.getEnvironment().getImage();
@@ -308,7 +320,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                 .withHostDockerInternalOnLinux()
                 .build();
         CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(
-                buildVariables(region, build, project, buildspec, logStream, credentials.env()),
+                buildVariables(region, build, logStream, credentials.env(), declared),
                 network.filter(ContainerSpec::acceptsLinkLocalIps),
                 credentials.servedAtEndpoint() ? credentialsRelay() : null,
                 resolvers.dnsServers() == null ? List.of() : resolvers.dnsServers(),
@@ -642,15 +654,13 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     /**
      * The variables Floci hands the build, each as the agent hands a project's: what CodeBuild sets that
-     * the agent does not, the role's session, the buildspec's Parameter Store and Secrets Manager entries,
-     * then the project's and the start's, each later one taking a name's place. The buildspec's own
-     * {@code env.variables} are the agent's to apply, under all of these, as CodeBuild orders them.
+     * the agent does not, the role's session, then the declared ones, resolved, each later one taking a
+     * name's place. The buildspec's own {@code env.variables} are the agent's to apply, under all of these,
+     * as CodeBuild orders them.
      */
-    private Map<String, String> buildVariables(String region, Build build, Project project,
-                                               ParsedBuildspec buildspec, String logStream,
-                                               Map<String, String> credentials) {
+    private Map<String, String> buildVariables(String region, Build build, String logStream,
+                                               Map<String, String> credentials, Map<String, String> declared) {
         Map<String, String> env = new LinkedHashMap<>();
-
         env.put("CODEBUILD_BUILD_ID", build.getId());
         env.put("CODEBUILD_BUILD_ARN", build.getArn());
         env.put("CODEBUILD_BUILD_NUMBER", String.valueOf(build.getBuildNumber()));
@@ -661,45 +671,41 @@ public class CodeBuildRunner implements ContainerTeardown {
         // The project's role, ahead of everything a project, its buildspec or the build's start
         // sets, which still reaches the build as CodeBuild's own variables do.
         env.putAll(credentials);
-
-        for (Map.Entry<String, String> e : buildspec.parameterStoreVars().entrySet()) {
-            try {
-                Parameter p = ssmService.getParameter(e.getValue(), region);
-                env.put(e.getKey(), p.getValue());
-            } catch (Exception ex) {
-                LOG.debugv("Could not resolve SSM parameter {0}: {1}", e.getValue(), ex.getMessage());
-            }
-        }
-
-        for (Map.Entry<String, String> e : buildspec.secretsManagerVars().entrySet()) {
-            try {
-                SecretVersion sv = secretsManagerService.getSecretValue(e.getValue(), null, null, region);
-                env.put(e.getKey(), sv.getSecretString() != null ? sv.getSecretString() : "");
-            } catch (Exception ex) {
-                LOG.debugv("Could not resolve secret {0}: {1}", e.getValue(), ex.getMessage());
-            }
-        }
-
-        if (project.getEnvironment() != null && project.getEnvironment().getEnvironmentVariables() != null) {
-            for (Map<String, String> v : project.getEnvironment().getEnvironmentVariables()) {
-                String name = v.get("name");
-                String value = v.get("value");
-                if (name != null) {
-                    env.put(name, value != null ? value : "");
-                }
-            }
-        }
-
-        if (build.getEnvironment() != null && build.getEnvironment().getEnvironmentVariables() != null) {
-            for (Map<String, String> v : build.getEnvironment().getEnvironmentVariables()) {
-                String name = v.get("name");
-                String value = v.get("value");
-                if (name != null) {
-                    env.put(name, value != null ? value : "");
-                }
-            }
-        }
+        env.putAll(declared);
         return env;
+    }
+
+    /**
+     * Every variable the build declares, lowest precedence first: the buildspec's
+     * {@code env.parameter-store} and {@code env.secrets-manager}, then the project's, then the start's
+     * {@code environmentVariablesOverride}.
+     */
+    private static List<CodeBuildVariables.Variable> declaredVariables(Build build, Project project,
+                                                                      ParsedBuildspec buildspec) {
+        List<CodeBuildVariables.Variable> declared = new ArrayList<>();
+        buildspec.parameterStoreVars().forEach((name, parameter) -> declared.add(
+                new CodeBuildVariables.Variable(name, CodeBuildVariables.PARAMETER_STORE, parameter)));
+        buildspec.secretsManagerVars().forEach((name, secret) -> declared.add(
+                new CodeBuildVariables.Variable(name, CodeBuildVariables.SECRETS_MANAGER, secret)));
+        if (project.getEnvironment() != null) {
+            addDeclared(declared, project.getEnvironment().getEnvironmentVariables());
+        }
+        if (build.getEnvironment() != null) {
+            addDeclared(declared, build.getEnvironment().getEnvironmentVariables());
+        }
+        return declared;
+    }
+
+    private static void addDeclared(List<CodeBuildVariables.Variable> declared, List<Map<String, String>> variables) {
+        if (variables == null) {
+            return;
+        }
+        for (Map<String, String> variable : variables) {
+            if (variable.get("name") != null) {
+                declared.add(new CodeBuildVariables.Variable(variable.get("name"), variable.get("type"),
+                        variable.get("value")));
+            }
+        }
     }
 
     String resolveEndpointUrl() {

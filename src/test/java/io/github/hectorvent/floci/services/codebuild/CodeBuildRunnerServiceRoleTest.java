@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codebuild;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -185,7 +186,8 @@ class CodeBuildRunnerServiceRoleTest {
         when(dockerHost.resolve()).thenReturn("flocihost");
 
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                null, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint,
+                null, new CodeBuildVariables(null, null, iam, null, config, new ObjectMapper()), config,
+                mock(ContainerDetector.class), regionResolver, endpoint,
                 new CodeBuildRoleCredentials(credentials, server), dockerHost));
         doReturn("container").when(runner).startAgent(any(), any());
         doReturn(new CodeBuildRunner.AgentExit(0, false)).when(runner).awaitAgent(anyString(), anyInt());

@@ -19,7 +19,7 @@ class CodeBuildRunnerTest {
         when(config.port()).thenReturn(4566);
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, 4811);
-        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null,
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null,
                 config, containerDetector, null, endpoint, null, null);
 
         assertEquals("http://host.docker.internal:4811", runner.resolveEndpointUrl());

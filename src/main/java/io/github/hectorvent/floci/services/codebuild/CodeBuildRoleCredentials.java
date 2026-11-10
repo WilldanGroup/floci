@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.codebuild;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
@@ -61,8 +63,7 @@ public class CodeBuildRoleCredentials {
      */
     public BuildCredentials provision(String buildArn, String buildId, String roleArn, String accountId,
                                       Optional<String> network) {
-        String sessionName = SESSION_PREFIX + buildId.substring(buildId.indexOf(':') + 1);
-        Optional<String> path = sessions.issue(buildArn, roleArn, accountId, sessionName, Instant.now());
+        Optional<String> path = sessions.issue(buildArn, roleArn, accountId, sessionName(buildId), Instant.now());
         if (path.isEmpty()) {
             throw new RoleNotFoundException("The project's service role " + roleArn
                     + " was not found in account " + accountId + ", so the build ran none of its commands");
@@ -78,6 +79,22 @@ public class CodeBuildRoleCredentials {
         }
         startServer();
         return new BuildCredentials(Map.of(RELATIVE_URI, path.get()), true);
+    }
+
+    /**
+     * The ARN a build's session calls as, {@code assumed-role/<role name>/AWSCodeBuild-<the build id after
+     * the project's name>}, in the role's partition and the project's account.
+     */
+    static String sessionArn(String roleArn, String buildId, String accountId, String region) {
+        String roleName = roleArn == null ? "" : roleArn.substring(roleArn.lastIndexOf('/') + 1);
+        String partition = AwsArnUtils.isArn(roleArn) ? AwsArnUtils.parse(roleArn).partition()
+                : AwsRegions.partitionFor(region);
+        return AwsArnUtils.Arn.global(partition, "sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName(buildId)).toString();
+    }
+
+    private static String sessionName(String buildId) {
+        return SESSION_PREFIX + buildId.substring(buildId.indexOf(':') + 1);
     }
 
     /** Revokes every generation of the build's session, however the build ended. */
