@@ -44,6 +44,7 @@ import io.floci.aws.services.cloudformation.provisioners.CloudTrailCfnProvisione
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.CodeArtifactCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoIdentityProviderCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
@@ -128,6 +129,7 @@ import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.configservice.AwsConfigService;
 import io.floci.aws.services.docdb.DocDbService;
@@ -279,6 +281,7 @@ final class CfnProvisionerFixture {
         private CloudMapService cloudMapService;
         private EventBridgeV2Service eventBridgeV2Service;
         private GuardDutyService guardDutyService;
+        private CodeArtifactService codeArtifactService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -553,6 +556,9 @@ final class CfnProvisionerFixture {
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
+            }
+            if (codeArtifactService != null) {
+                discovered.add(new CodeArtifactCfnProvisioner(codeArtifactService));
             }
             if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
                 discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
@@ -903,6 +909,11 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder codeArtifact(CodeArtifactService v) {
+            this.codeArtifactService = v;
             return this;
         }
 

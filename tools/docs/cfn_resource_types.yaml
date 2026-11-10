@@ -44,6 +44,7 @@ order:
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
+  - AWS::CodeArtifact
   - AWS::Batch
   - AWS::Cognito
   - AWS::CertificateManager
@@ -115,6 +116,7 @@ type_order:
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
   AWS::AppConfig: [Application, Environment, ConfigurationProfile, DeploymentStrategy]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
+  AWS::CodeArtifact: [Domain, Repository]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
   AWS::Events: [Rule, EventBus, EventBusPolicy]
@@ -139,6 +141,7 @@ service_labels:
   AWS::CloudFront: CloudFront
   AWS::CloudTrail: CloudTrail
   AWS::CloudWatch: CloudWatch
+  AWS::CodeArtifact: CodeArtifact
   AWS::CodeBuild: CodeBuild
   AWS::CodePipeline: CodePipeline
   AWS::Cognito: Cognito
