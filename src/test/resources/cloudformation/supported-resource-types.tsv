@@ -59,6 +59,8 @@ AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
 AWS::CloudWatch::CompositeAlarm	CloudWatchCompositeAlarmCfnProvisioner
 AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
+AWS::CodeArtifact::Domain	CodeArtifactCfnProvisioner
+AWS::CodeArtifact::Repository	CodeArtifactCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
 AWS::CodePipeline::Pipeline	CodePipelineCfnProvisioner

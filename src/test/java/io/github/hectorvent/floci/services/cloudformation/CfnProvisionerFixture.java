@@ -44,6 +44,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrai
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CodeArtifactCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolGroupCfnProvisioner;
@@ -125,6 +126,7 @@ import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashb
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
 import io.github.hectorvent.floci.services.docdb.DocDbService;
@@ -270,6 +272,7 @@ final class CfnProvisionerFixture {
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
         private GuardDutyService guardDutyService;
+        private CodeArtifactService codeArtifactService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -534,6 +537,9 @@ final class CfnProvisionerFixture {
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
+            }
+            if (codeArtifactService != null) {
+                discovered.add(new CodeArtifactCfnProvisioner(codeArtifactService));
             }
             if (bedrockAgentCoreControlService != null && bedrockAgentCoreMemoryService != null) {
                 discovered.add(new BedrockAgentCoreCfnProvisioner(bedrockAgentCoreControlService,
@@ -869,6 +875,11 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder codeArtifact(CodeArtifactService v) {
+            this.codeArtifactService = v;
             return this;
         }
 
