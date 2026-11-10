@@ -221,7 +221,7 @@ cross-resource references.
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
 | Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
-| CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `WaitConditionHandle` (Ref and `Id` return a URL naming the stack and the handle; no `WaitCondition` reads a signal sent to it), `Custom::*` (Lambda-backed) |
+| CloudFormation | `CustomResource`, `WaitConditionHandle` (Ref and `Id` return the URL a signal is `PUT` to, on the address a container Floci runs reaches it at), `WaitCondition` (holds the stack's create until `Count` success signals reach its handle, failing on a failure signal or at `Timeout`; `Data` is the signals' JSON), `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 <!-- floci:cfn-types:end -->
@@ -953,6 +953,34 @@ enabling TLS does not turn it into an AWS presigned S3 URL. The bundled Node.js 
 module for inline `ZipFile` code follows that URL's scheme and port and does not require TLS for
 this callback. The HTTPS/443 requirement applies to handlers with the hard-coded behavior above,
 not to every custom-resource handler.
+
+## Wait Conditions
+
+A `Ref` to an `AWS::CloudFormation::WaitConditionHandle` is the URL a signal is sent to,
+`<base>/cloudformation-waitcondition/<region>/<account>/<stack>/<logical id>/<uuid>`, where
+`<base>` is the address a container Floci launches reaches it at, the one a custom resource's
+`ResponseURL` names, so a Lambda or an EC2 container can signal it, over https when Floci serves TLS.
+A signal is a `PUT` of the JSON the CloudFormation User Guide gives, with an empty or omitted
+`Content-Type`:
+
+```json
+{"Status": "SUCCESS", "Reason": "Configuration Complete", "UniqueId": "ID1234", "Data": "done"}
+```
+
+An `AWS::CloudFormation::WaitCondition` stays `CREATE_IN_PROGRESS`, and so holds the rest of the
+stack's create, until its `Handle` has received `Count` success signals (one when `Count` is
+absent), each with its own `UniqueId`; a signal repeating a `UniqueId` is a retransmission and is
+ignored. A `FAILURE` signal fails it with `WaitCondition received failed message: '<Reason>' for
+uniqueId: <UniqueId>`, and `Timeout` seconds passing first fails it with `WaitCondition timed out.
+Received <n> conditions when expecting <Count>`; the stack then rolls back. Signals the handle
+received before the condition began waiting count. `Fn::GetAtt Data` is the JSON object of each
+success signal's `UniqueId` and `Data`; `Ref` and `Fn::GetAtt Id` are the stack id followed by the
+logical id. An update keeps a wait condition as it stands and waits on nothing, as the type's
+properties take no update, and a wait condition with no `Handle`, the form a `CreationPolicy` uses,
+completes at once, since Floci does not receive `SignalResource` signals.
+
+`CreateStack` and `UpdateStack` answer once the stack's operation has ended, so one holding a wait
+condition answers only after it is released. `ExecuteChangeSet` answers at once, as on AWS.
 
 ## Failed update rollbacks
 
