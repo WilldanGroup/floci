@@ -111,7 +111,7 @@ type_order:
   AWS::Route53: [HostedZone, RecordSet, RecordSetGroup, HealthCheck]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment, DomainName, ApiMapping]
-  AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
+  AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey, DomainName, DomainNameApiAssociation]
   AWS::AppConfig: [Application, Environment, ConfigurationProfile, DeploymentStrategy]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::CodeBuild: [Project, Fleet]

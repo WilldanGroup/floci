@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
+import io.github.hectorvent.floci.services.appsync.model.ApiAssociation;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
+import io.github.hectorvent.floci.services.appsync.model.DomainName;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
@@ -190,6 +192,85 @@ class AppSyncCfnProvisionerTest {
         // The DNS attributes are the endpoints' hosts, which is what a custom domain aliases.
         assertEquals("localhost", r.getAttributes().get("GraphQLDns"));
         assertEquals("localhost", r.getAttributes().get("RealtimeDns"));
+        assertEquals("arn:aws:appsync:eu-west-1:000000000000:endpoints/graphql-api/" + API_ID,
+                r.getAttributes().get("GraphQLEndpointArn"));
+    }
+
+    private static final String DOMAIN = "api.example.com";
+    private static final String DOMAIN_ARN = "arn:aws:appsync:eu-west-1:000000000000:domainnames/" + DOMAIN;
+    private static final String CERTIFICATE = "arn:aws:acm:us-east-1:000000000000:certificate/abc";
+
+    private static DomainName domainName(String description) {
+        DomainName dn = new DomainName();
+        dn.setDomainName(DOMAIN);
+        dn.setCertificateArn(CERTIFICATE);
+        dn.setDescription(description);
+        dn.setDomainNameArn(DOMAIN_ARN);
+        dn.setAppsyncDomainName("d1234abcd.cloudfront.net");
+        dn.setHostedZoneId("Z2FDTNDATAQYW2");
+        return dn;
+    }
+
+    private ObjectNode domainProps(String description) {
+        return mapper.createObjectNode().put("DomainName", DOMAIN).put("CertificateArn", CERTIFICATE)
+                .put("Description", description);
+    }
+
+    @Test
+    void domainNameAnswersRefWithTheNameAndEveryAttributeThePageLists() {
+        when(appSync.createDomainName(any())).thenReturn(domainName("api"));
+        StackResource r = resource("AWS::AppSync::DomainName", "ApiDomainName");
+
+        provisioner.provision(r, domainProps("api"), ctx());
+
+        assertEquals(DOMAIN, r.getPhysicalId());
+        Map<String, String> attributes = new HashMap<>(r.getAttributes());
+        attributes.keySet().removeIf(name -> name.startsWith("__Floci"));
+        assertEquals(Map.of("DomainName", DOMAIN, "DomainNameArn", DOMAIN_ARN,
+                "AppSyncDomainName", "d1234abcd.cloudfront.net", "HostedZoneId", "Z2FDTNDATAQYW2"), attributes);
+    }
+
+    @Test
+    void domainNameUpdateKeepingItsNameUpdatesItInPlace() {
+        when(appSync.getDomainName(DOMAIN)).thenReturn(domainName("api"));
+        when(appSync.updateDomainName(eq(DOMAIN), any())).thenReturn(domainName("renamed"));
+        StackResource r = resource("AWS::AppSync::DomainName", "ApiDomainName");
+        r.setPhysicalId(DOMAIN);
+
+        provisioner.provision(r, domainProps("renamed"), updateCtx(DOMAIN));
+
+        verify(appSync).updateDomainName(eq(DOMAIN), any());
+        verify(appSync, never()).createDomainName(any());
+    }
+
+    @Test
+    void associationIsIdentifiedByTheDomainNamesArnAndMovesToANewApiInPlace() {
+        when(appSync.getDomainName(DOMAIN)).thenReturn(domainName("api"));
+        ApiAssociation current = new ApiAssociation();
+        current.setApiId("old-api");
+        when(appSync.getApiAssociation(DOMAIN)).thenReturn(current);
+        StackResource r = resource("AWS::AppSync::DomainNameApiAssociation", "ApiDomainAssociation");
+        ObjectNode props = mapper.createObjectNode().put("DomainName", DOMAIN).put("ApiId", API_ID);
+
+        provisioner.provision(r, props, ctx());
+        verify(appSync).associateApi(DOMAIN, API_ID);
+        assertEquals(DOMAIN_ARN + "/apiassociation", r.getPhysicalId());
+        assertEquals(DOMAIN_ARN + "/apiassociation", r.getAttributes().get("ApiAssociationIdentifier"));
+
+        provisioner.provision(r, props, updateCtx(DOMAIN_ARN + "/apiassociation"));
+        verify(appSync).disassociateApi(DOMAIN);
+        verify(appSync, Mockito.times(2)).associateApi(DOMAIN, API_ID);
+    }
+
+    @Test
+    void associationDeleteDisassociatesTheDomainItsIdentifierNames() {
+        StackResource r = resource("AWS::AppSync::DomainNameApiAssociation", "ApiDomainAssociation");
+        r.setPhysicalId(DOMAIN_ARN + "/apiassociation");
+        doThrow(new AwsException("NotFoundException", "gone", 404)).when(appSync).disassociateApi(DOMAIN);
+
+        provisioner.delete(r, "eu-west-1");
+
+        verify(appSync).disassociateApi(DOMAIN);
     }
 
     @Test
@@ -891,10 +972,11 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
-    void resourceTypesCoverTheSixAppSyncTypes() {
+    void resourceTypesCoverTheEightAppSyncTypes() {
         assertEquals(Set.of("AWS::AppSync::GraphQLApi", "AWS::AppSync::GraphQLSchema",
                         "AWS::AppSync::DataSource", "AWS::AppSync::FunctionConfiguration",
-                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey"),
+                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey", "AWS::AppSync::DomainName",
+                        "AWS::AppSync::DomainNameApiAssociation"),
                 provisioner.resourceTypes());
     }
 }

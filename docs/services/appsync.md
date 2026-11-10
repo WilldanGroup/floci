@@ -520,12 +520,14 @@ Floci provisions these AppSync resource types:
 
 | Type | `Ref` returns | `Fn::GetAtt` attributes Floci serves |
 |---|---|---|
-| `AWS::AppSync::GraphQLApi` | the API id (AWS: the API ARN) | `ApiId`, `Arn`, `GraphQLUrl`, `GraphQLDns`, `RealtimeUrl`, `RealtimeDns` |
+| `AWS::AppSync::GraphQLApi` | the API id (AWS: the API ARN) | `ApiId`, `Arn`, `GraphQLEndpointArn`, `GraphQLUrl`, `GraphQLDns`, `RealtimeUrl`, `RealtimeDns` |
 | `AWS::AppSync::GraphQLSchema` | `<ApiId>GraphQLSchema` | `Id` (AWS rejects it, see below) |
 | `AWS::AppSync::DataSource` | the data source ARN | `DataSourceArn`, `Name` |
 | `AWS::AppSync::FunctionConfiguration` | the function ARN | `FunctionArn`, `FunctionId`, `Name`, `DataSourceName` |
 | `AWS::AppSync::Resolver` | the resolver ARN | `ResolverArn`, `TypeName`, `FieldName` |
 | `AWS::AppSync::ApiKey` | the key id, `da2-...` (AWS: the key ARN) | `ApiKey`, `ApiKeyId`, `Arn` |
+| `AWS::AppSync::DomainName` | the domain name | `DomainName`, `DomainNameArn`, `AppSyncDomainName`, `HostedZoneId` |
+| `AWS::AppSync::DomainNameApiAssociation` | `<DomainNameArn>/apiassociation` | `ApiAssociationIdentifier` |
 
 One template with all six types (an API with `API_KEY` plus `AWS_IAM` auth, `LogConfig`,
 `XrayEnabled`, an inline schema, an `AWS_LAMBDA` data source, a direct Lambda resolver, an
@@ -540,9 +542,8 @@ differences:
 - `Ref` on an `ApiKey` returns the key id. AWS returns the key ARN,
   `arn:<partition>:appsync:<region>:<account>:apis/<apiId>/apikeys/<keyId>`, the value of
   `Fn::GetAtt Arn`. `ApiKey` and `ApiKeyId` are the same `da2-` string on both.
-- `GraphQLEndpointArn` is not modeled. `Fn::GetAtt` on it resolves to the literal string
-  `<LogicalId>.GraphQLEndpointArn` and the stack still completes. AWS returns
-  `arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<id>`.
+- `GraphQLEndpointArn` is `arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<apiId>`.
+  AWS returns the same form with the id in the endpoint's hostname, which is not the API id.
 - `GraphQLUrl` and `RealtimeUrl` point at Floci: `<base-url>/v1/apis/<apiId>/graphql` and the
   matching WebSocket URL ending in `/graphql/realtime`. `GraphQLDns` and `RealtimeDns` are the
   host of `base-url`. AWS returns `https://<id>.appsync-api.<region>.amazonaws.com/graphql` and
@@ -569,8 +570,16 @@ location, and so does one naming an object Floci's S3 does not hold, with S3's o
 `NoSuchKey`.
 `RequestMappingTemplateS3Location` and `ResponseMappingTemplateS3Location` are not read.
 
-`AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `DomainName`, `DomainNameApiAssociation`,
-`SourceApiAssociation` and `Type` are not provisioned. By default such a resource is stubbed: it
+A `DomainName` is fronted as AppSync fronts one, by a CloudFront distribution name in CloudFront's
+hosted zone, `AppSyncDomainName` and `HostedZoneId`. Its `DomainName` and `CertificateArn` are
+createOnly: a new name stands a new domain name and the old one is deleted once the update commits,
+and a new certificate under the same name is refused. The reference page for
+`DomainNameApiAssociation` gives no return values; its registry schema's primary identifier,
+`ApiAssociationIdentifier`, is the domain name's ARN followed by `/apiassociation` on Floci, which
+has not been read on AWS. A new `ApiId` moves the association in place.
+
+`AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `SourceApiAssociation` and `Type` are not
+provisioned. By default such a resource is stubbed: it
 reaches `CREATE_COMPLETE` and nothing is created for it. Set
 `allow-stub-unsupported-resource-types` to `false` to fail it instead, see
 [CloudFormation](cloudformation.md#supported-resource-types).
