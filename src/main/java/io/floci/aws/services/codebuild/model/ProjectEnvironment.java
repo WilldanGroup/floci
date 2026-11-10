@@ -18,6 +18,7 @@ public class ProjectEnvironment {
     private Boolean privilegedMode;
     private String certificate;
     private String imagePullCredentialsType;
+    private ProjectFleet fleet;
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
@@ -39,4 +40,7 @@ public class ProjectEnvironment {
 
     public String getImagePullCredentialsType() { return imagePullCredentialsType; }
     public void setImagePullCredentialsType(String imagePullCredentialsType) { this.imagePullCredentialsType = imagePullCredentialsType; }
+
+    public ProjectFleet getFleet() { return fleet; }
+    public void setFleet(ProjectFleet fleet) { this.fleet = fleet; }
 }

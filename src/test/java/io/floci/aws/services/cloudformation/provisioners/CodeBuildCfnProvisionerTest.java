@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
@@ -18,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -115,5 +117,85 @@ class CodeBuildCfnProvisionerTest {
 
         assertEquals("arn:aws:codebuild:us-east-1:000000000000:project/from-handler",
                 r.getAttributes().get("Arn"));
+    }
+
+    private static final String FLEET_ARN =
+            "arn:aws:codebuild:us-east-1:000000000000:fleet/runners:11111111-2222-3333-4444-555555555555";
+
+    private static StackResource fleet(String priorPhysicalId) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Runners");
+        r.setResourceType("AWS::CodeBuild::Fleet");
+        r.setAttributes(new HashMap<>());
+        r.setPhysicalId(priorPhysicalId);
+        return r;
+    }
+
+    private ObjectNode fleetProps() {
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "runners");
+        props.put("BaseCapacity", 1);
+        props.put("ComputeType", "BUILD_GENERAL1_SMALL");
+        props.put("EnvironmentType", "ARM_CONTAINER");
+        props.put("OverflowBehavior", "ON_DEMAND");
+        props.putObject("FleetVpcConfig").put("VpcId", "vpc-1").putArray("Subnets").add("subnet-1");
+        return props;
+    }
+
+    private Response fleetResponse() {
+        ObjectNode body = mapper.createObjectNode();
+        body.putObject("fleet").put("arn", FLEET_ARN);
+        return Response.ok(body).build();
+    }
+
+    @Test
+    void fleetIsCreatedWithTheApiNamesAndAnswersRefAndArnWithItsArn() throws Exception {
+        when(handler.handle(eq("CreateFleet"), any(), eq("us-east-1"), eq("000000000000")))
+                .thenReturn(fleetResponse());
+        StackResource r = fleet(null);
+
+        provisioner.provision(r, fleetProps(), ctx());
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).handle(eq("CreateFleet"), request.capture(), eq("us-east-1"), eq("000000000000"));
+        JsonNode sent = request.getValue();
+        assertEquals("runners", sent.path("name").asText());
+        assertEquals(1, sent.path("baseCapacity").asInt());
+        assertEquals("ARM_CONTAINER", sent.path("environmentType").asText());
+        assertEquals("ON_DEMAND", sent.path("overflowBehavior").asText());
+        assertEquals("vpc-1", sent.path("vpcConfig").path("vpcId").asText());
+        assertEquals(false, sent.has("fleetVpcConfig"));
+        assertEquals(FLEET_ARN, r.getPhysicalId());
+        assertEquals(FLEET_ARN, r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void fleetKeepingItsNameIsUpdatedInPlaceByItsArn() throws Exception {
+        when(handler.handle(eq("UpdateFleet"), any(), eq("us-east-1"), eq("000000000000")))
+                .thenReturn(fleetResponse());
+        StackResource r = fleet(FLEET_ARN);
+        r.getAttributes().put("Arn", FLEET_ARN);
+
+        provisioner.provision(r, fleetProps(), new ProvisionContext(ctx().engine(), "us-east-1", "000000000000",
+                "cfn-stack", FLEET_ARN));
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).handle(eq("UpdateFleet"), request.capture(), eq("us-east-1"), eq("000000000000"));
+        assertEquals(FLEET_ARN, request.getValue().path("arn").asText());
+        assertEquals(false, request.getValue().has("name"));
+        verify(handler, never()).handle(eq("CreateFleet"), any(), any(), any());
+        assertEquals(FLEET_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void fleetDeleteSendsItsArnAndToleratesOneAlreadyGone() throws Exception {
+        when(handler.handle(eq("DeleteFleet"), any(), eq("us-east-1"), eq("000000000000")))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Fleet not found", 400));
+
+        provisioner.delete("AWS::CodeBuild::Fleet", FLEET_ARN, "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(handler).handle(eq("DeleteFleet"), request.capture(), eq("us-east-1"), eq("000000000000"));
+        assertEquals(FLEET_ARN, request.getValue().path("arn").asText());
     }
 }

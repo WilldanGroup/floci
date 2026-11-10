@@ -220,7 +220,7 @@ cross-resource references.
 | AppConfig | `Application`, `Environment` (`Tags` and `DeletionProtectionCheck` are accepted and not stored), `ConfigurationProfile` (`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored), `DeploymentStrategy` (`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document). `Ref` returns the AppConfig ID of each. See [AppConfig](appconfig.md#cloudformation) for updates and replacement. |
 | Step Functions | `StateMachine` |
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
-| CodeBuild | `Project` |
+| CodeBuild | `Project`, `Fleet` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolIdentityProvider` (Ref returns the ProviderName; changing only `ProviderType` is refused, as on AWS, because the name is always the template's and the replacement would need the same address), `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |

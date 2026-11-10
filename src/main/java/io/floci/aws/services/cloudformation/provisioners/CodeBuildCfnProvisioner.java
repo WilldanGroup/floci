@@ -14,19 +14,32 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * CloudFormation provisioning for CodeBuild: {@code AWS::CodeBuild::Project}.
+ * CloudFormation provisioning for CodeBuild: {@code AWS::CodeBuild::Project} and
+ * {@code AWS::CodeBuild::Fleet}.
  *
  * <p>CloudFormation properties are PascalCase while the CodeBuild API is camelCase; the
  * recursive first-letter-lowercase transform maps them, with one irregular field —
- * {@code BuildSpec} is {@code buildspec} (all lowercase) on the wire.</p>
+ * {@code BuildSpec} is {@code buildspec} (all lowercase) on the wire. A fleet's
+ * {@code FleetVpcConfig} and {@code FleetProxyConfiguration} are the API's {@code vpcConfig} and
+ * {@code proxyConfiguration}.</p>
+ *
+ * <p>A fleet answers {@code Ref} and {@code Fn::GetAtt Arn} with its ARN, as the CloudFormation
+ * Template Reference's page for {@code AWS::CodeBuild::Fleet} has it. Its {@code Name} is
+ * createOnly: a template that changes it stands a new fleet and the old one is deleted once the
+ * update commits; every other property is updated in place.</p>
  */
 @ApplicationScoped
 public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildCfnProvisioner.class);
+    private static final String PROJECT = "AWS::CodeBuild::Project";
+    private static final String FLEET = "AWS::CodeBuild::Fleet";
+    private static final int FLEET_NAME_MAX_LENGTH = 128;
 
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final RegionResolver regionResolver;
@@ -42,11 +55,20 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::CodeBuild::Project");
+        return Set.of(PROJECT, FLEET);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        switch (r.getResourceType()) {
+            case PROJECT -> provisionProject(r, props, ctx);
+            case FLEET -> provisionFleet(r, props, ctx);
+            default -> throw new IllegalStateException(
+                    "CodeBuildCfnProvisioner cannot provision " + r.getResourceType());
+        }
+    }
+
+    private void provisionProject(StackResource r, JsonNode props, ProvisionContext ctx) {
         ObjectNode request = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
         boolean update = r.getPhysicalId() != null && !r.getPhysicalId().isBlank();
         String name = request.path("name").asText(null);
@@ -64,8 +86,79 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
                         AwsArnUtils.Arn.of("codebuild", ctx.region(), ctx.accountId(), "project/" + name).toString()));
     }
 
+    private void provisionFleet(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        ObjectNode request = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
+        renameMember(request, "fleetVpcConfig", "vpcConfig");
+        renameMember(request, "fleetProxyConfiguration", "proxyConfiguration");
+        // A prior id that is no ARN is a dispatcher stub, which names no fleet to update.
+        String priorName = ctx.isUpdate() && AwsArnUtils.isArn(ctx.priorPhysicalId())
+                ? fleetName(ctx.priorPhysicalId())
+                : null;
+        String name = request.path("name").asText(null);
+        if (name == null || name.isBlank()) {
+            name = priorName != null
+                    ? priorName
+                    : ctx.generatePhysicalName(r.getLogicalId(), FLEET_NAME_MAX_LENGTH, false);
+            request.put("name", name);
+        }
+
+        JsonNode response;
+        if (name.equals(priorName)) {
+            request.remove("name");
+            request.put("arn", ctx.priorPhysicalId());
+            if (!request.has("tags")) {
+                request.putArray("tags");
+            }
+            response = handle("UpdateFleet", request, ctx.region(), ctx.accountId());
+        } else {
+            response = handle("CreateFleet", request, ctx.region(), ctx.accountId());
+        }
+
+        String arn = response.path("fleet").path("arn").asText();
+        r.setPhysicalId(arn);
+        r.getAttributes().put("Arn", arn);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return FLEET.equals(resource.getResourceType()) && ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return FLEET.equals(resource.getResourceType()) ? ReplacementCleanup.cleanupPhysicalId(resource) : null;
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return FLEET.equals(resource.getResourceType())
+                ? ReplacementCleanup.complete(resource, this::delete)
+                : UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        if (FLEET.equals(resource.getResourceType())) {
+            ReplacementCleanup.clear(resource);
+        }
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return FLEET.equals(resource.getResourceType()) && ReplacementCleanup.rollback(resource, this::delete);
+    }
+
     @Override
     public void delete(String resourceType, String physicalId, String region) {
+        if (FLEET.equals(resourceType)) {
+            CfnDeletes.safeDelete("CodeBuild fleet", physicalId,
+                    () -> handle("DeleteFleet", mapper.createObjectNode().put("arn", physicalId), region,
+                            AwsArnUtils.parse(physicalId).accountId()),
+                    "ResourceNotFoundException");
+            return;
+        }
         try {
             handle("DeleteProject", mapper.createObjectNode().put("name", physicalId),
                     region, regionResolver.getAccountId());
@@ -91,6 +184,21 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
         } catch (Exception e) {
             throw new AwsException("InternalFailure",
                     "CodeBuild " + action + " failed: " + e.getMessage(), 500);
+        }
+    }
+
+    /** The name in a fleet ARN, {@code fleet/<name>:<uuid>}. */
+    private static String fleetName(String arn) {
+        String resource = AwsArnUtils.parse(arn).resource();
+        String id = resource.substring(resource.indexOf('/') + 1);
+        int separator = id.lastIndexOf(':');
+        return separator < 0 ? id : id.substring(0, separator);
+    }
+
+    private static void renameMember(ObjectNode node, String from, String to) {
+        JsonNode value = node.remove(from);
+        if (value != null) {
+            node.set(to, value);
         }
     }
 

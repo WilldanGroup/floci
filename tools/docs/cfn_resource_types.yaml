@@ -115,6 +115,7 @@ type_order:
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
   AWS::AppConfig: [Application, Environment, ConfigurationProfile, DeploymentStrategy]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
+  AWS::CodeBuild: [Project, Fleet]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
   AWS::Events: [Rule, EventBus, EventBusPolicy]

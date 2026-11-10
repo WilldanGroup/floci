@@ -8,10 +8,11 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 
 - `arn:aws:codebuild:<region>:<account>:project/<name>`
 - `arn:aws:codebuild:<region>:<account>:report-group/<name>`
+- `arn:aws:codebuild:<region>:<account>:fleet/<name>:<uuid>`
 - `arn:aws:codebuild:<region>:<account>:token/<type>-<uuid>`
 - `arn:aws:codebuild:<region>:<account>:build/<project>:<uuid>`
 
-## Supported Operations (20 total)
+## Supported Operations (25 total)
 
 ### Projects
 
@@ -22,6 +23,18 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 | `DeleteProject` | Removes project by name |
 | `BatchGetProjects` | Returns found projects and a `projectsNotFound` list |
 | `ListProjects` | Returns project names in the region, with optional name, creation-time, or last-modified-time sorting |
+
+A project's `environment.fleet.fleetArn` is stored and returned; a build on it runs as an on-demand build does.
+
+### Compute Fleets
+
+| Operation | Notes |
+|---|---|
+| `CreateFleet` | Stores the fleet; requires `name`, `baseCapacity`, `computeType`, `environmentType`; the fleet is `ACTIVE` at once and no reserved capacity runs |
+| `UpdateFleet` | Partial update by ARN — only supplied fields are modified |
+| `DeleteFleet` | Removes the fleet by ARN |
+| `BatchGetFleets` | Returns found fleets by name or ARN and a `fleetsNotFound` list |
+| `ListFleets` | Returns the account's fleet names in the region, with optional name, creation-time, or last-modified-time sorting |
 
 ### Build Execution
 
