@@ -188,7 +188,7 @@ class CodeBuildRunnerServiceRoleTest {
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
                 null, new CodeBuildVariables(null, null, iam, null, config, new ObjectMapper()), config,
                 mock(ContainerDetector.class), regionResolver, endpoint,
-                new CodeBuildRoleCredentials(credentials, server), dockerHost));
+                new CodeBuildRoleCredentials(credentials, server), dockerHost, mock(CodeBuildEventPublisher.class)));
         doReturn("container").when(runner).startAgent(any(), any());
         doReturn(new CodeBuildRunner.AgentExit(0, false)).when(runner).awaitAgent(anyString(), anyInt());
         doNothing().when(runner).removeComposeProject(anyString());

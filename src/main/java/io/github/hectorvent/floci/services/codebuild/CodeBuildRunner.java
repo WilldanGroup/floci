@@ -87,6 +87,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final ContainerReachableEndpoint containerEndpoint;
     private final CodeBuildRoleCredentials roleCredentials;
     private final DockerHostResolver dockerHostResolver;
+    private final CodeBuildEventPublisher events;
 
     private final ConcurrentHashMap<String, RunningAgent> runningAgents = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -104,7 +105,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            RegionResolver regionResolver,
                            ContainerReachableEndpoint containerEndpoint,
                            CodeBuildRoleCredentials roleCredentials,
-                           DockerHostResolver dockerHostResolver) {
+                           DockerHostResolver dockerHostResolver,
+                           CodeBuildEventPublisher events) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -117,6 +119,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.containerEndpoint = containerEndpoint;
         this.roleCredentials = roleCredentials;
         this.dockerHostResolver = dockerHostResolver;
+        this.events = events;
     }
 
     /** One build's agent: its container, and the compose project of the containers it started. */
@@ -172,10 +175,12 @@ public class CodeBuildRunner implements ContainerTeardown {
     /**
      * Runs one build to its end. The build is recorded complete only once everything it made is gone, its
      * agent's containers and volumes and its working folder, so a caller that reads it complete finds
-     * nothing of it left.
+     * nothing of it left. Its state changes go to the default event bus as it starts and once it is
+     * recorded complete, so a reader the end wakes finds the build ended.
      */
     private void runBuild(String region, Build build, Project project,
                           String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
+        events.buildStateChanged(build, project, "IN_PROGRESS");
         BuildResources resources = new BuildResources();
         String status;
         try {
@@ -192,6 +197,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         }
         finishWith(build, status);
+        events.buildStateChanged(build, project, status);
     }
 
     /** What a build has made that its end removes. */
