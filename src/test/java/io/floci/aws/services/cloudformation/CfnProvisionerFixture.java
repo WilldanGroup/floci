@@ -121,6 +121,7 @@ import io.floci.aws.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.TransferCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.WafV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.WaitConditionCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.WaitConditionHandleCfnProvisioner;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudmap.CloudMapService;
@@ -280,6 +281,7 @@ final class CfnProvisionerFixture {
         private CloudMapService cloudMapService;
         private EventBridgeV2Service eventBridgeV2Service;
         private GuardDutyService guardDutyService;
+        private WaitConditionSignalStore waitConditionSignals;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
         private CloudFormationResourceRegistry resourceRegistry;
@@ -322,8 +324,11 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
-            if (config != null) {
-                discovered.add(new WaitConditionHandleCfnProvisioner(config));
+            if (reachableEndpoint != null) {
+                discovered.add(new WaitConditionHandleCfnProvisioner(reachableEndpoint));
+            }
+            if (waitConditionSignals != null) {
+                discovered.add(new WaitConditionCfnProvisioner(waitConditionSignals));
             }
             if (signerService != null) {
                 discovered.add(new SignerCfnProvisioner(signerService));
@@ -907,6 +912,11 @@ final class CfnProvisionerFixture {
 
         public Builder guardDuty(GuardDutyService v) {
             this.guardDutyService = v;
+            return this;
+        }
+
+        public Builder waitConditionSignals(WaitConditionSignalStore v) {
+            this.waitConditionSignals = v;
             return this;
         }
 
