@@ -155,6 +155,15 @@ public class ContainerLogStreamer {
     }
 
     /**
+     * Hands each line the container writes, from its start and reassembled as {@link #attach} reassembles
+     * them, to {@code lines}, and sends it nowhere else: for a container whose output holds another's log,
+     * whose caller decides which lines go where. Returns the handle to close once the container stops.
+     */
+    public Closeable followLines(String containerId, Consumer<String> lines) {
+        return follow(containerId, null, lines);
+    }
+
+    /**
      * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
      * log a container's: for the output of a command run in a container. A line is held only until its
      * newline, or split at {@link LogLineBuffer}'s cap, so output without a newline holds no more than that.

@@ -27,7 +27,7 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 
 | Operation | Notes |
 |---|---|
-| `StartBuild` | Launches a real Docker container using the project's image; runs buildspec phases (`INSTALL`, `PRE_BUILD`, `BUILD`, `POST_BUILD`); returns immediately with `IN_PROGRESS` status |
+| `StartBuild` | Runs the build in CodeBuild's local agent on the project's image (see Build Execution Model); returns immediately with `IN_PROGRESS` status |
 | `BatchGetBuilds` | Returns current build state; poll until `buildComplete` is `true` |
 | `ListBuilds` | Returns all build IDs in the region, most recent first |
 | `ListBuildsForProject` | Returns build IDs for a specific project |
@@ -60,17 +60,25 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 
 ## Build Execution Model
 
+A build runs in CodeBuild's local agent, the image AWS publishes for running a build as CodeBuild runs it ("Run builds locally with the AWS CodeBuild agent", AWS CodeBuild User Guide), so the agent's executor runs the buildspec's phases, under the shell `env.shell` names (`bash` or `/bin/sh`), and writes the build's log. Floci runs the agent of the Docker host's architecture, pinned by the digest AWS publishes for it:
+
+| Architecture | Agent |
+|---|---|
+| x86_64 | `public.ecr.aws/codebuild/local-builds@sha256:ccb19bdd7af94e4dc761e4c58c267e9455c28ec68d938086b4dc1cf8fe6b0940` (`:latest`) |
+| aarch64 | `public.ecr.aws/codebuild/local-builds@sha256:7d7b5d35d2ac4e062ae7ba8c662ffed15229a52d09bd0d664a7816c439679192` (`:aarch64`) |
+
 Each `StartBuild` call:
 
-1. Pulls the project's Docker image (e.g. `public.ecr.aws/docker/library/alpine:latest`)
-2. Starts a container with the working directories pre-created
-3. Injects source files into the container via `docker cp` (`NO_SOURCE` builds skip this step)
-4. Executes buildspec phases sequentially inside the container via `docker exec`
-5. Streams phase output to CloudWatch Logs under `/aws/codebuild/<project>`
-6. Extracts artifact files from the container via `docker cp` and uploads them to S3 if `artifacts.type=S3`
-7. Marks the build complete with `SUCCEEDED`, `FAILED`, or `STOPPED`
+1. Refuses, in its `PROVISIONING` phase and before any agent starts, a project whose environment type is the other architecture's (`ARM_CONTAINER` and the other `ARM_*` types are aarch64, `LINUX_CONTAINER` and the other `LINUX_*` types x86_64), naming both: CodeBuild runs a build on a host of its environment's architecture, and Floci runs nothing emulated
+2. Makes the build a working folder, holding its source (an `S3` source's archive, extracted; nothing for `NO_SOURCE`), its buildspec, and the folder the agent writes its artifacts into
+3. Starts the agent with what `codebuild_build.sh` hands it: the Docker socket, `IMAGE_NAME` (the project's image), `SOURCE`, `ARTIFACTS`, `BUILDSPEC`, `INITIATOR`, `LOCAL_AGENT_IMAGE_NAME` and, for a privileged project, `DOCKER_PRIVILEGED_MODE`. The agent brings up two containers with docker-compose, itself and a container of the project's image the buildspec runs in, under a compose project of the build's own
+4. Reads the agent's output for the build's phases (`DOWNLOAD_SOURCE` to `UPLOAD_ARTIFACTS`, each with the context it ended with) and sends the build's log to CloudWatch Logs under `/aws/codebuild/<project>`
+5. Uploads the artifacts the agent collected to S3 if `artifacts.type=S3`: the archive, or each file in it for `packaging: NONE`
+6. Removes the agent, the containers and volumes it started and the working folder, then marks the build complete with `SUCCEEDED`, `FAILED`, `FAULT`, `TIMED_OUT` or `STOPPED`
 
-Source injection and artifact extraction both use the Docker API's archive copy endpoints — no bind mounts are required. This works correctly when Floci itself runs inside a Docker container (Docker-in-Docker).
+Floci adds a compose file of its own after the agent's. With it the agent and the build's container join the Docker network builds run on, `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK`, else `FLOCI_SERVICES_DOCKER_NETWORK`, else Floci's own when Floci runs in a container, and never Docker's default bridge: where none of those is a user-defined network, compose gives the build a network of its own. Both carry Floci's labels, and the build's container reads the buildspec Floci resolved (the request's override, the project's inline buildspec, or the source's `buildspec.yml`) at a path of its own, so a buildspec from the request never takes the place of a file of the source. The variables Floci hands the build, the project's and the request's among them, reach it as the agent hands a project's, so they take precedence over the buildspec's own `env.variables`, as CodeBuild orders them.
+
+The working folder is made under `FLOCI_SERVICES_CODEBUILD_AGENT_WORKSPACE`, else `floci-codebuild` under `$SLUICE_TMP` where that is set, else `/tmp/floci-codebuild-<floci.port>`. The agent binds what is in it from the Docker host, so that folder must be the same path on the host and in Floci's container: with Floci in a container, bind it at its own path (`-v /tmp/floci-codebuild-4566:/tmp/floci-codebuild-4566`). What Floci makes there it gives to the folder's owner.
 
 ## The Build's Credentials
 
@@ -93,6 +101,8 @@ Floci parses the `buildspec.yml` embedded in the project or provided via `builds
 - `artifacts.files` — list of file patterns to collect; supports `**/*` glob, specific filenames, and path patterns
 - `artifacts.base-directory` — base directory for artifact collection (default: `$CODEBUILD_SRC_DIR`)
 
+The agent reads every other part of the buildspec as CodeBuild does, `env.shell` among them. Floci reads the `env.parameter-store` and `env.secrets-manager` entries itself and hands the agent the buildspec without them.
+
 ## Artifact Upload
 
 When `artifacts.type=S3`, collected files are uploaded to the configured S3 bucket. The bucket must exist (created via `CreateBucket`). File paths in S3 match the relative path from the artifact base directory.
@@ -102,6 +112,9 @@ When `artifacts.type=S3`, collected files are uploaded to the configured S3 buck
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CODEBUILD_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK` | Floci's own network | The Docker network a build's agent and containers join |
+| `FLOCI_SERVICES_CODEBUILD_AGENT_IMAGE` | the agent for the Docker host's architecture, by digest | The image of CodeBuild's local agent a build runs in |
+| `FLOCI_SERVICES_CODEBUILD_AGENT_WORKSPACE` | `floci-codebuild` under `$SLUICE_TMP`, else `/tmp/floci-codebuild-<floci.port>` | Where each build's working folder is made; the same path on the Docker host and in Floci's container |
 
 ## CLI Examples
 
