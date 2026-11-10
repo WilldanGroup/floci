@@ -9,13 +9,12 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.services.codebuild.model.Build;
 import io.floci.aws.services.codebuild.model.BuildPhase;
 import io.floci.aws.services.codebuild.model.Project;
 import io.floci.aws.services.codebuild.model.ProjectEnvironment;
 import io.floci.aws.services.codebuild.model.ProjectSource;
-import io.floci.aws.services.ecs.container.EcsCredentialsProxy;
-import io.floci.aws.services.ecs.container.EcsTaskLinkLocalAddresses;
 import io.floci.aws.services.ecs.container.EcsTaskRoleCredentials;
 import io.floci.aws.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.floci.aws.services.iam.IamService;
@@ -52,8 +51,9 @@ import static org.mockito.Mockito.when;
 /**
  * A build runs as the role its project names as {@code serviceRole}, handed over the way CodeBuild
  * hands it: on a user-defined network, the container credentials endpoint's relative URI and no
- * keys; on the default bridge, where no container can hold a link-local address, the same session
- * as keys. A build whose role cannot be found never starts its agent.
+ * keys, the endpoint served by a relay in the build container's own network namespace that forwards
+ * to the credentials server; on the default bridge, the same session as keys. A build whose role
+ * cannot be found never starts its agent.
  */
 class CodeBuildRunnerServiceRoleTest {
 
@@ -64,6 +64,7 @@ class CodeBuildRunnerServiceRoleTest {
     private static final String ROLE_NAME = "build-role";
     private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT + ":role/service-role/" + ROLE_NAME;
     private static final String NETWORK = "builds";
+    private static final int CREDENTIALS_PORT = 51679;
     private static final Set<String> NO_KEYS = Set.of(
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
             "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN",
@@ -82,6 +83,9 @@ class CodeBuildRunnerServiceRoleTest {
                 .orElseThrow(() -> new AssertionError("no AWS_CONTAINER_CREDENTIALS_RELATIVE_URI in " + env));
         assertTrue(relativeUri.startsWith("/"), relativeUri);
         assertTrue(!relativeUri.contains("://"), relativeUri);
+        CodeBuildAgent.CredentialsRelay relay = fixture.plan().relay();
+        assertEquals("flocihost", relay.host());
+        assertEquals(CREDENTIALS_PORT, relay.port());
 
         SessionCredential session = fixture.issuedSession();
         assertEquals(ROLE_ARN, session.getRoleArn());
@@ -104,6 +108,7 @@ class CodeBuildRunnerServiceRoleTest {
         assertEquals(ROLE_ARN, session.getRoleArn());
         assertEquals("AWSCodeBuild-7", session.getRoleSessionName());
         assertTrue(value(env, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").isEmpty(), env::toString);
+        assertEquals(null, fixture.plan().relay());
     }
 
     @Test
@@ -161,6 +166,7 @@ class CodeBuildRunnerServiceRoleTest {
         when(config.services().codebuild().agentWorkspace()).thenReturn(Optional.of(workspace.toString()));
         when(config.services().codebuild().agentImage()).thenReturn(Optional.of("agent:latest"));
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
+        when(config.services().ecs().taskRoleCredentials().port()).thenReturn(CREDENTIALS_PORT);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
@@ -175,11 +181,12 @@ class CodeBuildRunnerServiceRoleTest {
         EcsTaskRoleCredentials credentials = new EcsTaskRoleCredentials(iam, config);
         EcsTaskRoleCredentialsServer server = mock(EcsTaskRoleCredentialsServer.class);
         when(server.start()).thenReturn(CompletableFuture.completedFuture(null));
-        EcsCredentialsProxy proxy = mock(EcsCredentialsProxy.class);
+        DockerHostResolver dockerHost = mock(DockerHostResolver.class);
+        when(dockerHost.resolve()).thenReturn("flocihost");
 
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
                 null, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint,
-                new CodeBuildRoleCredentials(credentials, server, proxy, new EcsTaskLinkLocalAddresses())));
+                new CodeBuildRoleCredentials(credentials, server), dockerHost));
         doReturn("container").when(runner).startAgent(any(), any());
         doReturn(new CodeBuildRunner.AgentExit(0, false)).when(runner).awaitAgent(anyString(), anyInt());
         doNothing().when(runner).removeComposeProject(anyString());
@@ -218,11 +225,16 @@ class CodeBuildRunnerServiceRoleTest {
             assertTrue(Boolean.TRUE.equals(build.getBuildComplete()), "build did not finish: " + phases(build));
         }
 
-        /** The variables the build's agent was handed. */
-        Map<String, String> env() {
+        /** What the build's agent was handed beside its own compose file. */
+        CodeBuildAgent.Plan plan() {
             ArgumentCaptor<CodeBuildAgent.Plan> captor = ArgumentCaptor.forClass(CodeBuildAgent.Plan.class);
             verify(runner).startAgent(any(), captor.capture());
-            return captor.getValue().variables();
+            return captor.getValue();
+        }
+
+        /** The variables the build's agent was handed. */
+        Map<String, String> env() {
+            return plan().variables();
         }
 
         /** The one session the build's start registered with IAM. */

@@ -60,6 +60,12 @@ final class CodeBuildAgent {
     /** The one variable the agent's environment file also sets on the build's container itself. */
     static final String RELATIVE_URI = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI";
 
+    /** Where the AWS SDKs read {@link #RELATIVE_URI} ("Container credential provider", AWS SDKs and Tools). */
+    static final String CREDENTIALS_ADDRESS = "169.254.170.2";
+
+    /** The service of Floci's that serves the build's container the credentials endpoint. */
+    static final String RELAY_SERVICE = "credentials";
+
     /**
      * Runs the agent's own docker-compose with Floci's file after the agent's, on every call the agent
      * makes ({@code config}, {@code down}, {@code up}), so its validation sees what runs.
@@ -154,13 +160,29 @@ final class CodeBuildAgent {
      * @param variables        each variable the build's commands read, by name, handed as the agent's
      *                         environment file hands them, so a value may hold a newline or a {@code $}
      * @param network          the user-defined network both services join, or empty for compose's own
+     * @param relay            what serves the build's container the credentials endpoint, or null
      * @param dnsServers       the build container's resolvers
      * @param extraHosts       the build container's {@code host:ip} entries
      * @param labels           Floci's labels for both containers and the project's volumes
      * @param buildspec        the buildspec's path on the Docker host
      */
-    record Plan(Map<String, String> variables, Optional<String> network,
+    record Plan(Map<String, String> variables, Optional<String> network, CredentialsRelay relay,
                 List<String> dnsServers, List<String> extraHosts, Map<String, String> labels, Path buildspec) {
+    }
+
+    /**
+     * A relay of {@code image} in the build container's own network namespace, which holds
+     * {@link #CREDENTIALS_ADDRESS} on that namespace's loopback and forwards port 80 there to the
+     * credentials server at {@code host:port}. The build's container reads its session at the address CodeBuild
+     * serves it on, and no packet to or from {@code 169.254.0.0/16} crosses the network: a host whose
+     * firewall checks the reverse path of bridged traffic drops one, as NixOS's does by default.
+     */
+    record CredentialsRelay(String image, String host, int port) {
+
+        List<String> command() {
+            return List.of("ip address add " + CREDENTIALS_ADDRESS + "/32 dev lo && exec socat TCP-LISTEN:80,bind="
+                    + CREDENTIALS_ADDRESS + ",fork,reuseaddr TCP:" + host + ":" + port);
+        }
     }
 
     /** Floci's compose file for one build, with every {@code $} escaped from compose's interpolation. */
@@ -194,6 +216,16 @@ final class CodeBuildAgent {
         Map<String, Object> services = new LinkedHashMap<>();
         services.put("agent", agent);
         services.put("build", build);
+        if (plan.relay() != null) {
+            Map<String, Object> relay = new LinkedHashMap<>();
+            relay.put("image", literal(plan.relay().image()));
+            relay.put("network_mode", "service:build");
+            relay.put("cap_add", List.of("NET_ADMIN"));
+            relay.put("entrypoint", List.of("/bin/sh", "-c"));
+            relay.put("command", plan.relay().command().stream().map(CodeBuildAgent::literal).toList());
+            relay.put("labels", literals(plan.labels()));
+            services.put(RELAY_SERVICE, relay);
+        }
 
         Map<String, Object> volumeLabels = Map.of("labels", literals(plan.labels()));
         Map<String, Object> volumes = new LinkedHashMap<>();

@@ -20,6 +20,8 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.DockerHostResolver;
+import io.floci.aws.core.common.docker.LocallyBuiltHelperImage;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.floci.aws.services.codebuild.model.Build;
@@ -73,6 +75,8 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final String UNIX_SCHEME = "unix://";
     private static final String COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
     private static final int STOP_TIMEOUT_SECONDS = 5;
+    private static final String HELPER_IMAGE = "floci/network-helper:local";
+    private static final String HELPER_DOCKERFILE = "/docker/network-helper.Dockerfile";
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -86,6 +90,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final RegionResolver regionResolver;
     private final ContainerReachableEndpoint containerEndpoint;
     private final CodeBuildRoleCredentials roleCredentials;
+    private final DockerHostResolver dockerHostResolver;
 
     private final ConcurrentHashMap<String, RunningAgent> runningAgents = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -103,7 +108,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
                            ContainerReachableEndpoint containerEndpoint,
-                           CodeBuildRoleCredentials roleCredentials) {
+                           CodeBuildRoleCredentials roleCredentials,
+                           DockerHostResolver dockerHostResolver) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -116,6 +122,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.regionResolver = regionResolver;
         this.containerEndpoint = containerEndpoint;
         this.roleCredentials = roleCredentials;
+        this.dockerHostResolver = dockerHostResolver;
     }
 
     /** One build's agent: its container, and the compose project of the containers it started. */
@@ -304,6 +311,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(
                 buildVariables(region, build, project, buildspec, logStream, credentials.env()),
                 network.filter(ContainerSpec::acceptsLinkLocalIps),
+                credentials.servedAtEndpoint() ? credentialsRelay() : null,
                 resolvers.dnsServers() == null ? List.of() : resolvers.dnsServers(),
                 resolvers.extraHosts() == null ? List.of() : resolvers.extraHosts(),
                 agentLabels(buildId, region), buildspecFile);
@@ -353,7 +361,8 @@ public class CodeBuildRunner implements ContainerTeardown {
         if (!phases.sawPhase()) {
             completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", "FAULT_ERROR",
                     "CodeBuild's local agent " + agentImage.get() + " ended with exit code " + exit.exitCode()
-                            + " and ran no phase");
+                            + " and ran no phase" + phases.lastLine().map(line -> "; its last line: " + line)
+                            .orElse(""));
             return "FAULT";
         }
         boolean buildFailed = phases.failed();
@@ -417,7 +426,6 @@ public class CodeBuildRunner implements ContainerTeardown {
         if (resources.composeProject != null) {
             removeComposeProject(resources.composeProject);
         }
-        roleCredentials.releaseAddress(executionId);
         if (resources.buildFolder != null) {
             deleteDirectory(resources.buildFolder);
         }
@@ -504,6 +512,18 @@ public class CodeBuildRunner implements ContainerTeardown {
         String host = config.docker() != null ? config.docker().dockerHost() : null;
         return host != null && host.startsWith(UNIX_SCHEME)
                 ? host.substring(UNIX_SCHEME.length()) : DEFAULT_DOCKER_SOCKET;
+    }
+
+    /**
+     * The relay that serves the build's container its session at the credentials endpoint, of the helper
+     * image ECS's credentials proxy runs, forwarding to the credentials server at Floci's address.
+     */
+    private CodeBuildAgent.CredentialsRelay credentialsRelay() {
+        String image = config.services().ecs().taskRoleCredentials().proxyImage();
+        LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder, image, HELPER_IMAGE, HELPER_DOCKERFILE);
+        String resolved = containerBuilder.resolveImage(image);
+        return new CodeBuildAgent.CredentialsRelay(resolved != null ? resolved : image, dockerHostResolver.resolve(),
+                config.services().ecs().taskRoleCredentials().port());
     }
 
     /** Starts the agent's container; returns its id. */
@@ -849,12 +869,16 @@ public class CodeBuildRunner implements ContainerTeardown {
         private final Build build;
         private String lastCompleted;
         private boolean sawPhase;
+        private String lastLine;
 
         AgentPhases(Build build) {
             this.build = build;
         }
 
         synchronized void accept(String line) {
+            if (!line.isBlank()) {
+                lastLine = line.strip();
+            }
             Matcher entering = ENTERING.matcher(line);
             if (entering.matches()) {
                 if (findPhase(build, entering.group(1)).isEmpty()) {
@@ -885,6 +909,11 @@ public class CodeBuildRunner implements ContainerTeardown {
 
         synchronized boolean sawPhase() {
             return sawPhase;
+        }
+
+        /** The build log's last line, which says why an agent that ran no phase ended. */
+        synchronized Optional<String> lastLine() {
+            return Optional.ofNullable(lastLine);
         }
 
         synchronized boolean failed() {

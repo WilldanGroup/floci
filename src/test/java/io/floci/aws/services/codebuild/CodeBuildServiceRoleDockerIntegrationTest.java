@@ -6,7 +6,6 @@ import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
-import io.floci.aws.services.ecs.container.EcsCredentialsProxy;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.DockerAvailability;
@@ -51,18 +50,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A build runs as its project's service role, end to end: on a user-defined Docker network, with
- * IAM enforcement on, a build reads its role's session at {@code 169.254.170.2} through the
- * container credentials proxy, the AWS CLI's default chain finds it there, STS answers the role's
- * {@code AWSCodeBuild-<id>} session, and the role's policy alone decides what the build may list.
- * Once the build has ended, the path it was handed answers nothing.
+ * IAM enforcement on, a build in CodeBuild's local agent reads its role's session at
+ * {@code 169.254.170.2} through the relay in its container's own network namespace, the AWS CLI's
+ * default chain finds it there, STS answers the role's {@code AWSCodeBuild-<id>} session, and the
+ * role's policy alone decides what the build may list. Once the build has ended, the path it was
+ * handed answers nothing.
  *
  * <p>Runs in both shapes Floci runs in. With Floci on the host, the builds join a network this test
- * creates, and the proxy forwards over {@code host.docker.internal}. With Floci itself in a
+ * creates, and the relay forwards over {@code host.docker.internal}. With Floci itself in a
  * container on a user-defined network, the builds join Floci's own network, as no CodeBuild network
- * is configured, and the proxy forwards to Floci's address there. Floci in a container on the
+ * is configured, and the relay forwards to Floci's address there. Floci in a container on the
  * default bridge cannot hand a build the endpoint, so the test is skipped there.
  *
- * <p>The build installs the AWS CLI with pip, so it needs to reach PyPI. Skipped without a Docker
+ * <p>The build installs the AWS CLI with pip, so it needs to reach PyPI. Its image carries bash, which
+ * the agent's executor runs a build's environment through, as CodeBuild's images all do. Skipped without a Docker
  * daemon, like the other {@code *DockerIntegrationTest} classes.
  */
 @QuarkusTest
@@ -90,9 +91,6 @@ class CodeBuildServiceRoleDockerIntegrationTest {
 
     @Inject
     CurrentContainerNetworkResolver currentContainerNetworkResolver;
-
-    @Inject
-    EcsCredentialsProxy credentialsProxy;
 
     @Inject
     IamService iamService;
@@ -142,8 +140,6 @@ class CodeBuildServiceRoleDockerIntegrationTest {
             // A role the test never got to make.
         }
         if (createdNetworkId != null) {
-            // The proxy lives for the process; it has to go before the network it holds an address on.
-            credentialsProxy.stopManagedContainers();
             dockerClient.removeNetworkCmd(createdNetworkId).exec();
         }
     }
@@ -196,7 +192,10 @@ class CodeBuildServiceRoleDockerIntegrationTest {
         project.put("name", projectName);
         project.put("source", Map.of("type", "NO_SOURCE", "buildspec", buildspec()));
         project.put("artifacts", Map.of("type", "S3", "location", resultsBucket, "packaging", "NONE"));
-        project.put("environment", Map.of("type", "LINUX_CONTAINER", "image", TestImages.PYTHON_ALPINE,
+        // The Docker host's own architecture, as a build of the other's is refused.
+        String host = CodeBuildAgent.normalizeArchitecture(dockerClient.infoCmd().exec().getArchitecture());
+        String type = CodeBuildAgent.AARCH64.equals(host) ? "ARM_CONTAINER" : "LINUX_CONTAINER";
+        project.put("environment", Map.of("type", type, "image", TestImages.PYTHON_SLIM,
                 "computeType", "BUILD_GENERAL1_SMALL"));
         project.put("serviceRole", roleArn);
         codeBuild("CreateProject").body(project).post("/").then().statusCode(200);
@@ -213,7 +212,8 @@ class CodeBuildServiceRoleDockerIntegrationTest {
                     commands:
                       - env | sed 's/=.*//' | sort > env-names.txt
                       - echo "$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" > relative-uri.txt
-                      - wget -S -O credentials.json "http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" 2> credentials-headers.txt
+                      - |
+                        python3 -c "import os, urllib.request; r = urllib.request.urlopen('http://169.254.170.2' + os.environ['AWS_CONTAINER_CREDENTIALS_RELATIVE_URI'], timeout=10); open('credentials.json', 'wb').write(r.read()); print('HTTP', r.status, r.reason)" > credentials-headers.txt 2>&1
                       - aws sts get-caller-identity --query Arn --output text > caller.txt
                       - aws configure set default.s3.addressing_style path
                       - aws s3api list-objects-v2 --bucket %s > /dev/null && echo "granted listed" > granted.txt

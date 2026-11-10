@@ -27,6 +27,9 @@ public final class TestImages {
 
     public static final String PYTHON_ALPINE = "python:3.12-alpine";
 
+    /** Python on Debian, which carries bash, as CodeBuild's local agent needs of a build's image. */
+    public static final String PYTHON_SLIM = "python:3.12-slim";
+
     /** A small image whose {@code sh} is not bash and which carries bash, for a buildspec that asks for bash. */
     public static final String DEBIAN_SLIM = "debian:trixie-slim";
 
