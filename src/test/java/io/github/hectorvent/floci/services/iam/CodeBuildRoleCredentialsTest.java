@@ -4,8 +4,6 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildRoleCredentials;
-import io.github.hectorvent.floci.services.ecs.container.EcsCredentialsProxy;
-import io.github.hectorvent.floci.services.ecs.container.EcsTaskLinkLocalAddresses;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +15,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -37,7 +36,7 @@ class CodeBuildRoleCredentialsTest {
 
     private IamService iamService;
     private EcsTaskRoleCredentials sessions;
-    private EcsCredentialsProxy proxy;
+    private EcsTaskRoleCredentialsServer server;
     private CodeBuildRoleCredentials credentials;
     private String roleArn;
 
@@ -53,10 +52,9 @@ class CodeBuildRoleCredentialsTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
         sessions = new EcsTaskRoleCredentials(iamService, config);
-        EcsTaskRoleCredentialsServer server = mock(EcsTaskRoleCredentialsServer.class);
+        server = mock(EcsTaskRoleCredentialsServer.class);
         when(server.start()).thenReturn(CompletableFuture.completedFuture(null));
-        proxy = mock(EcsCredentialsProxy.class);
-        credentials = new CodeBuildRoleCredentials(sessions, server, proxy, new EcsTaskLinkLocalAddresses());
+        credentials = new CodeBuildRoleCredentials(sessions, server);
     }
 
     @Test
@@ -68,8 +66,7 @@ class CodeBuildRoleCredentialsTest {
         String accessKeyId = sessions.resolveByPath(path, Instant.now()).orElseThrow().getAccessKeyId();
         assertEquals(Optional.of("arn:aws:sts::" + ACCOUNT + ":assumed-role/build-role/AWSCodeBuild-7"),
                 iamService.resolveCallerArn(accessKeyId));
-        assertTrue(handed.linkLocalAddress().startsWith("169.254."), handed.linkLocalAddress());
-        verify(proxy).ensureProxyOn("builds");
+        assertTrue(handed.servedAtEndpoint());
     }
 
     @Test
@@ -92,8 +89,8 @@ class CodeBuildRoleCredentialsTest {
 
         assertEquals(Optional.of("arn:aws:sts::" + ACCOUNT + ":assumed-role/build-role/AWSCodeBuild-7"),
                 iamService.resolveCallerArn(handed.env().get("AWS_ACCESS_KEY_ID")));
-        assertEquals(null, handed.linkLocalAddress());
-        verify(proxy, never()).ensureProxyOn("bridge");
+        assertFalse(handed.servedAtEndpoint());
+        assertEquals(null, handed.env().get(RELATIVE_URI));
     }
 
     @Test
@@ -105,6 +102,6 @@ class CodeBuildRoleCredentialsTest {
                 () -> credentials.provision(BUILD_ARN, "project:7", missing, ACCOUNT, Optional.of("builds")));
 
         assertTrue(refused.getMessage().contains(missing), refused.getMessage());
-        verify(proxy, never()).ensureProxyOn("builds");
+        verify(server, never()).start();
     }
 }

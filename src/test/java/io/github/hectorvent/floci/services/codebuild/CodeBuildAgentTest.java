@@ -133,8 +133,27 @@ class CodeBuildAgentTest {
         assertEquals(nothingResolved, BuildspecParser.withoutResolvedVariables(nothingResolved));
     }
 
+    @Test
+    void theBuildsContainerReadsItsSessionAtTheCredentialsAddressThroughARelayInItsOwnNetworkNamespace()
+            throws Exception {
+        CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(Map.of(), Optional.of("floci-net"),
+                new CodeBuildAgent.CredentialsRelay("floci/network-helper:local", "172.30.0.2", 51679), List.of(),
+                List.of(), Map.of("floci", "true"), Path.of("/tmp/w/b-1/buildspec.yml"));
+
+        JsonNode relay = YAML.readTree(CodeBuildAgent.composeOverride(plan)).path("services").path("credentials");
+
+        assertEquals("floci/network-helper:local", relay.path("image").asText());
+        assertEquals("service:build", relay.path("network_mode").asText());
+        assertEquals("NET_ADMIN", relay.path("cap_add").get(0).asText());
+        assertEquals("ip address add 169.254.170.2/32 dev lo && exec socat TCP-LISTEN:80,bind=169.254.170.2,"
+                + "fork,reuseaddr TCP:172.30.0.2:51679", relay.path("command").get(0).asText());
+        assertTrue(YAML.readTree(CodeBuildAgent.composeOverride(plan(Map.of(), Optional.of("floci-net"))))
+                .path("services").path("credentials").isMissingNode());
+    }
+
     private static CodeBuildAgent.Plan plan(Map<String, String> variables, Optional<String> network) {
-        return new CodeBuildAgent.Plan(variables, network, List.of("10.0.0.2"), List.of("host.docker.internal:host-gateway"),
-                Map.of("floci", "true"), Path.of("/tmp/w/b-1/buildspec.yml"));
+        return new CodeBuildAgent.Plan(variables, network, null, List.of("10.0.0.2"),
+                List.of("host.docker.internal:host-gateway"), Map.of("floci", "true"),
+                Path.of("/tmp/w/b-1/buildspec.yml"));
     }
 }
