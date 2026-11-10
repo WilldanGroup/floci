@@ -593,6 +593,17 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   property answers `GetBucketOwnershipControls` with `OwnershipControlsNotFoundError`, where AWS
   reports its default, `BucketOwnerEnforced`.
 
+## S3 replication configuration
+
+`AWS::S3::Bucket` applies `ReplicationConfiguration` through the same S3 call as
+`PutBucketReplication`, on create and in place on update, after the bucket's versioning: the
+`Role`, and each rule's `Id`, `Priority`, `Status`, `Filter` (`Prefix`, `TagFilter`, or `And` of a
+prefix and `TagFilters`) or top-level `Prefix`, `DeleteMarkerReplication` and `Destination`
+`Bucket`, `Account` and `StorageClass`. An `Fn::If` that chooses `AWS::NoValue` declares none. An
+update that removes the property from a template that declared it deletes the configuration.
+Objects written to the bucket afterwards are replicated as [S3](s3.md) describes; the other
+members of a rule and a destination are accepted and not applied.
+
 ## ECS task definitions
 
 CloudFormation hands an `AWS::ECS::TaskDefinition`'s properties to the ECS resource handler

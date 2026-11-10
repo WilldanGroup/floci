@@ -629,7 +629,6 @@ AWS::S3::Bucket	MetadataTableConfiguration	accepted and ignored
 AWS::S3::Bucket	MetricsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
-AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored

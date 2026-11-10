@@ -31,18 +31,19 @@ import java.util.Set;
  * <p>A property this class covers is translated into the XML its own S3 API call takes and handed
  * to the same S3 service method used by a direct {@code PutBucket*} request. Ownership controls
  * are validated here before the service stores their XML. A property the template does not declare is left alone, except that
- * an update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
+ * an update removing {@code NotificationConfiguration}, {@code OwnershipControls} or
+ * {@code ReplicationConfiguration} clears it.
  *
  * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
- * {@code BucketEncryption}, {@code LifecycleConfiguration},
+ * {@code BucketEncryption}, {@code LifecycleConfiguration}, {@code ReplicationConfiguration},
  * {@code OwnershipControls}, {@code NotificationConfiguration} and
  * {@code Tags}. {@code NotificationConfiguration} is the exception to the XML translation: its
  * service method takes the parsed model, so the provisioner builds that model instead.
  *
  * <p><b>Silently dropped</b>, each of which has a service method waiting for it:
  * {@code WebsiteConfiguration}, {@code LoggingConfiguration},
- * {@code ObjectLockConfiguration}, {@code ReplicationConfiguration},
+ * {@code ObjectLockConfiguration},
  * {@code AccelerateConfiguration}, {@code AccessControl}, and the four numbered configuration
  * lists ({@code AnalyticsConfigurations}, {@code IntelligentTieringConfigurations},
  * {@code InventoryConfigurations}, {@code MetricsConfigurations}). Declaring one of these still
@@ -131,6 +132,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             applyPublicAccessBlockConfiguration(bucketName, props, ctx);
             applyBucketEncryption(bucketName, props, ctx);
             applyLifecycleConfiguration(bucketName, props, ctx);
+            applyReplicationConfiguration(bucketName, props, ctx);
             applyBucketTags(bucketName, props, ctx);
             applyBucketOwnershipControls(bucketName, ownershipControlsXml, ctx);
         } catch (RuntimeException failure) {
@@ -252,6 +254,81 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         s3Service.putBucketLifecycle(bucketName, lifecycleXml(lifecycle.get("Rules"), ctx), null);
+    }
+
+    /**
+     * Puts the bucket's replication configuration, CloudFormation's {@code ReplicationConfiguration}
+     * spelled as PutBucketReplication's XML: the {@code Role}, and each rule's {@code Id},
+     * {@code Priority}, {@code Status}, its filter ({@code Filter} with a {@code Prefix}, a
+     * {@code TagFilter} or an {@code And} of a prefix and {@code TagFilters}, or the earlier
+     * top-level {@code Prefix}), {@code DeleteMarkerReplication} and its {@code Destination}'s
+     * {@code Bucket}, {@code Account} and {@code StorageClass}. An update that drops the property
+     * deletes the configuration. Applied after versioning, which replication requires.
+     */
+    private void applyReplicationConfiguration(String bucketName, JsonNode props, ProvisionContext ctx) {
+        JsonNode declaredNode = declared(props, "ReplicationConfiguration");
+        JsonNode replication = declaredNode == null ? null : ctx.engine().resolveNodeOmittingNoValue(declaredNode);
+        if (replication == null || replication.isMissingNode() || replication.isNull()) {
+            if (ctx.reusesPriorEntity(bucketName) && ctx.previouslyDeclared("ReplicationConfiguration")) {
+                s3Service.deleteBucketReplication(bucketName);
+            }
+            return;
+        }
+        XmlBuilder xml = new XmlBuilder().start("ReplicationConfiguration", AwsNamespaces.S3);
+        appendText(xml, "Role", replication.path("Role"));
+        for (JsonNode rule : replication.path("Rules")) {
+            xml.start("Rule");
+            appendText(xml, "ID", rule.path("Id"));
+            appendText(xml, "Priority", rule.path("Priority"));
+            appendText(xml, "Prefix", rule.path("Prefix"));
+            JsonNode filter = rule.path("Filter");
+            if (filter.isObject()) {
+                xml.start("Filter");
+                appendText(xml, "Prefix", filter.path("Prefix"));
+                appendReplicationTag(xml, filter.path("TagFilter"));
+                JsonNode and = filter.path("And");
+                if (and.isObject()) {
+                    xml.start("And");
+                    appendText(xml, "Prefix", and.path("Prefix"));
+                    for (JsonNode tag : and.path("TagFilters")) {
+                        appendReplicationTag(xml, tag);
+                    }
+                    xml.end("And");
+                }
+                xml.end("Filter");
+            }
+            appendText(xml, "Status", rule.path("Status"));
+            JsonNode destination = rule.path("Destination");
+            xml.start("Destination");
+            appendText(xml, "Bucket", destination.path("Bucket"));
+            appendText(xml, "Account", destination.path("Account"));
+            appendText(xml, "StorageClass", destination.path("StorageClass"));
+            xml.end("Destination");
+            JsonNode deleteMarkers = rule.path("DeleteMarkerReplication");
+            if (deleteMarkers.isObject()) {
+                xml.start("DeleteMarkerReplication");
+                appendText(xml, "Status", deleteMarkers.path("Status"));
+                xml.end("DeleteMarkerReplication");
+            }
+            xml.end("Rule");
+        }
+        s3Service.putBucketReplication(bucketName, xml.end("ReplicationConfiguration").build());
+    }
+
+    private static void appendReplicationTag(XmlBuilder xml, JsonNode tag) {
+        if (tag.isObject()) {
+            xml.start("Tag");
+            appendText(xml, "Key", tag.path("Key"));
+            appendText(xml, "Value", tag.path("Value"));
+            xml.end("Tag");
+        }
+    }
+
+    /** An element for a resolved scalar; nothing for one the template left out. */
+    private static void appendText(XmlBuilder xml, String element, JsonNode value) {
+        if (value != null && value.isValueNode() && !value.isNull()) {
+            xml.elem(element, value.asText());
+        }
     }
 
     /**
