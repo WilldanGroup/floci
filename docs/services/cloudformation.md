@@ -52,6 +52,11 @@ StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` 
 
 `CreateStackInstances` and `UpdateStackSet` execute the backing CloudFormation stacks in each target account. A failed resource can therefore drive the backing stack through rollback and leave the stack instance `INOPERABLE` with detailed status `FAILED`; the StackSet operation is reported as `FAILED` instead of being forced to success.
 
+`CreateStackSet` and `UpdateStackSet` hold a template to the limit of the parameter that carries
+it, as the API reference has them: a `TemplateBody` to 51,200 bytes and the template a
+`TemplateURL` names to 1 MB (1,048,576 bytes), each refused with a `ValidationError` naming its
+limit.
+
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
 
 ## CloudWatch Logs log streams

@@ -24,6 +24,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -93,6 +94,31 @@ public class StackSetService implements PassedRoleLookup {
 
     // ── StackSet lifecycle ─────────────────────────────────────────────────────
 
+    /** The most a {@code TemplateBody} may carry, in bytes. */
+    static final int MAX_TEMPLATE_BODY_BYTES = 51_200;
+    /** The most the template a {@code TemplateURL} names may hold, 1 MB, in bytes. */
+    static final int MAX_TEMPLATE_URL_BYTES = 1_048_576;
+
+    /**
+     * Holds a CreateStackSet's or UpdateStackSet's template to the limit of the parameter that
+     * carried it, as the CloudFormation API Reference's pages for the two actions have them: a
+     * {@code TemplateBody} of at most 51,200 bytes, and a template at a {@code TemplateURL} of at
+     * most 1 MB. {@code template} is what the URL resolved to; a request naming neither is not
+     * checked here.
+     */
+    public static void requireTemplateSize(String templateBody, String templateUrl, String template) {
+        if (templateBody != null && !templateBody.isBlank()) {
+            if (templateBody.getBytes(StandardCharsets.UTF_8).length > MAX_TEMPLATE_BODY_BYTES) {
+                throw new AwsException("ValidationError",
+                        "TemplateBody must be no larger than " + MAX_TEMPLATE_BODY_BYTES + " bytes.", 400);
+            }
+        } else if (templateUrl != null && !templateUrl.isBlank() && template != null
+                && template.getBytes(StandardCharsets.UTF_8).length > MAX_TEMPLATE_URL_BYTES) {
+            throw new AwsException("ValidationError", "The template at TemplateURL must be no larger than "
+                    + MAX_TEMPLATE_URL_BYTES + " bytes.", 400);
+        }
+    }
+
     public StackSet createStackSet(String name, String templateBody, Map<String, String> parameters,
                                    List<String> capabilities, Map<String, String> tags, String description) {
         return createStackSet(name, templateBody, parameters, capabilities, tags, description,
@@ -112,9 +138,6 @@ public class StackSetService implements PassedRoleLookup {
         }
         if (templateBody == null || templateBody.isBlank()) {
             throw new AwsException("ValidationError", "Either TemplateBody or TemplateURL must be specified", 400);
-        }
-        if (templateBody.length() > 51_200) {
-            throw new AwsException("ValidationError", "TemplateBody must be no larger than 51200 bytes.", 400);
         }
         if (description != null && (description.isBlank() || description.length() > 1024)) {
             throw new AwsException("ValidationError", "Description must be between 1 and 1024 characters.", 400);
