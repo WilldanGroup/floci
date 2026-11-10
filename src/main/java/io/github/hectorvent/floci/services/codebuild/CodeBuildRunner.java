@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.codebuild;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.command.WaitContainerResultCallback;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Network;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -17,7 +19,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
-import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -31,41 +32,46 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.PathMatcher;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
-import java.util.zip.ZipOutputStream;
 
+/**
+ * Runs a build in CodeBuild's local agent ({@link CodeBuildAgent}), the image AWS publishes for running a
+ * build as CodeBuild runs it: the agent's executor runs the buildspec's phases in a container of the
+ * project's image, under the shell the buildspec names, and prints the build's log, which Floci reads for
+ * the build's phases and sends to CloudWatch Logs. Floci records the phases before the agent's own
+ * (SUBMITTED, QUEUED, PROVISIONING) and after them (FINALIZING, COMPLETED), and uploads the artifacts the
+ * agent collected.
+ */
 @ApplicationScoped
 public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
-    private static final int FAILURE_OUTPUT_CHARS = 512;
+    private static final String DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
+    private static final String UNIX_SCHEME = "unix://";
+    private static final String COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+    private static final int STOP_TIMEOUT_SECONDS = 5;
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -80,8 +86,9 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final ContainerReachableEndpoint containerEndpoint;
     private final CodeBuildRoleCredentials roleCredentials;
 
-    private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RunningAgent> runningAgents = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
+    private volatile String hostArchitecture;
 
     @Inject
     public CodeBuildRunner(DockerClient dockerClient,
@@ -110,21 +117,30 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.roleCredentials = roleCredentials;
     }
 
+    /** One build's agent: its container, and the compose project of the containers it started. */
+    record RunningAgent(String containerId, String composeProject) {
+    }
+
+    /** How the agent's container ended: its exit code, or that the build's timeout came first. */
+    record AgentExit(Integer exitCode, boolean timedOut) {
+    }
+
     /**
-     * Stops the containers of all in-flight builds on emulator shutdown; without this
-     * they outlive the process as orphans. Build state is transient, so there is no
-     * persisted status to update.
+     * Stops every in-flight build's agent and the containers it started on emulator shutdown; without
+     * this they outlive the process as orphans. Build state is transient, so there is no persisted status
+     * to update.
      */
     @Override
     public void stopManagedContainers() {
-        for (Map.Entry<String, String> entry : new LinkedHashMap<>(runningContainers).entrySet()) {
-            if (runningContainers.remove(entry.getKey(), entry.getValue())) {
+        for (Map.Entry<String, RunningAgent> entry : new LinkedHashMap<>(runningAgents).entrySet()) {
+            if (runningAgents.remove(entry.getKey(), entry.getValue())) {
                 try {
-                    lifecycleManager.stopAndRemove(entry.getValue(), null);
+                    lifecycleManager.stopAndRemove(entry.getValue().containerId(), null);
                 } catch (Exception e) {
-                    LOG.warnv("Failed to stop CodeBuild container for build {0} on shutdown: {1}",
+                    LOG.warnv("Failed to stop the CodeBuild agent of build {0} on shutdown: {1}",
                             entry.getKey(), e.getMessage());
                 }
+                removeComposeProject(entry.getValue().composeProject());
             }
         }
     }
@@ -141,292 +157,423 @@ public class CodeBuildRunner implements ContainerTeardown {
         if (flag != null) {
             flag.set(true);
         }
-        String containerId = runningContainers.get(executionId);
-        if (containerId != null) {
+        RunningAgent agent = runningAgents.get(executionId);
+        if (agent != null) {
             try {
-                dockerClient.stopContainerCmd(containerId).withTimeout(5).exec();
+                dockerClient.stopContainerCmd(agent.containerId()).withTimeout(STOP_TIMEOUT_SECONDS).exec();
             } catch (Exception e) {
-                LOG.debugv("Error stopping build container {0}: {1}", containerId, e.getMessage());
+                LOG.debugv("Error stopping the CodeBuild agent {0}: {1}", agent.containerId(), e.getMessage());
             }
         }
     }
 
+    /**
+     * Runs one build to its end. The build is recorded complete only once everything it made is gone, its
+     * agent's containers and volumes and its working folder, so a caller that reads it complete finds
+     * nothing of it left.
+     */
     private void runBuild(String region, Build build, Project project,
                           String buildspecOverride, AtomicBoolean stopFlag, String executionId) {
-        String buildId = build.getId();
-        Path workspace = null;
-        String containerId = null;
-        Closeable logHandle = null;
-
+        BuildResources resources = new BuildResources();
+        String status;
         try {
-            // SUBMITTED
-            beginPhase(build, "SUBMITTED");
-            completePhase(build, "SUBMITTED", "SUCCEEDED");
-
-            if (stopFlag.get()) { finishStopped(build); return; }
-
-            // QUEUED
-            beginPhase(build, "QUEUED");
-            completePhase(build, "QUEUED", "SUCCEEDED");
-
-            if (stopFlag.get()) { finishStopped(build); return; }
-
-            // PROVISIONING: the build's own session of its project's service role, before
-            // anything of its buildspec runs.
-            beginPhase(build, "PROVISIONING");
-            build.setCurrentPhase("PROVISIONING");
-            workspace = Files.createTempDirectory("floci-codebuild-");
-            Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().codebuild().dockerNetwork());
-            CodeBuildRoleCredentials.BuildCredentials credentials;
-            try {
-                credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
-                        accountOf(project), network);
-            } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
-                completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
-                finishFailed(build);
-                return;
-            } catch (RuntimeException e) {
-                completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
-                throw e;
-            }
-            completePhase(build, "PROVISIONING", "SUCCEEDED");
-
-            if (stopFlag.get()) { finishStopped(build); return; }
-
-            // DOWNLOAD_SOURCE
-            beginPhase(build, "DOWNLOAD_SOURCE");
-            build.setCurrentPhase("DOWNLOAD_SOURCE");
-
-            String buildspecContent;
-            try {
-                buildspecContent = resolveAndAcquireSource(region, build, project, buildspecOverride, workspace);
-            } catch (AwsException e) {
-                completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
-                finishFailed(build);
-                return;
-            }
-
-            ParsedBuildspec buildspec;
-            try {
-                buildspec = BuildspecParser.parse(buildspecContent);
-            } catch (AwsException e) {
-                completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
-                finishFailed(build);
-                return;
-            }
-
-            completePhase(build, "DOWNLOAD_SOURCE", "SUCCEEDED");
-
-            if (stopFlag.get()) { finishStopped(build); return; }
-
-            String logGroup = "/aws/codebuild/" + project.getName();
-            String logStream = logStreamer.generateLogStreamName(buildId.replace(":", "/"));
-
-            String image = build.getEnvironment() != null && build.getEnvironment().getImage() != null
-                    ? build.getEnvironment().getImage()
-                    : project.getEnvironment().getImage();
-
-            boolean privileged = (project.getEnvironment() != null
-                    && Boolean.TRUE.equals(project.getEnvironment().getPrivilegedMode()))
-                    || (build.getEnvironment() != null
-                    && Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode()));
-
-            Map<String, Object> logsMap = new HashMap<>();
-            logsMap.put("groupName", logGroup);
-            logsMap.put("streamName", logStream);
-            logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "log-group:" + logGroup + ":log-stream:" + logStream).toString());
-            build.setLogs(logsMap);
-
-            List<String> envList = buildEnvList(region, build, project, buildspec, logStream, credentials.env());
-
-            // Keep the container alive so each phase can be run with docker exec.
-            // No bind mount needed — source and artifacts are transferred with docker cp.
-            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                    .withCmd(List.of("sh", "-c", "tail -f /dev/null"))
-                    .withEnv(envList)
-                    .withDockerNetwork(config.services().codebuild().dockerNetwork())
-                    .withEmbeddedDns()
-                    .withHostDockerInternalOnLinux()
-                    .withPrivileged(privileged)
-                    .withLogRotation()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "codebuild", buildId, regionResolver.getAccountId(), region));
-            // Its own address in 169.254.0.0/16, without which the container has no route to the
-            // credentials endpoint's 169.254.170.2.
-            if (credentials.linkLocalAddress() != null) {
-                specBuilder.withLinkLocalIp(credentials.linkLocalAddress());
-            }
-            ContainerSpec spec = specBuilder.build();
-
-            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
-            containerId = info.containerId();
-            runningContainers.put(executionId, containerId);
-
-            logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
-
-            String containerSrcDir = "/codebuild/output/src/src";
-            int timeoutMinutes = build.getTimeoutInMinutes() != null ? build.getTimeoutInMinutes() : 60;
-            boolean buildFailed = false;
-
-            // createAndStart returns as soon as the container's entrypoint process is
-            // running, which can be before any startup command would finish. Create the
-            // working directory with an explicit, awaited exec (run from "/", which always
-            // exists) so the source copy, the phase execs that chdir into it, and the final
-            // artifact copy can never race against container startup.
-            PhaseResult workDirResult = runPhase(containerId, "/", envList,
-                    List.of("mkdir -p " + containerSrcDir), timeoutMinutes, stopFlag);
-            if (workDirResult.stopped()) { finishStopped(build); return; }
-            if (workDirResult.failed()) {
-                throw new IllegalStateException("Could not create build working directory "
-                        + containerSrcDir + ": " + workDirResult.errorMessage());
-            }
-
-            // Copy downloaded source files into the container (no-op for NO_SOURCE builds)
-            try {
-                copySourceToContainer(containerId, workspace, containerSrcDir);
-            } catch (RuntimeException e) {
-                if (stopFlag.get()) { finishStopped(build); return; }
-                completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
-                throw e;
-            }
-
-            // INSTALL
-            if (stopFlag.get()) { finishStopped(build); return; }
-            beginPhase(build, "INSTALL");
-            build.setCurrentPhase("INSTALL");
-            PhaseResult installResult = runPhase(containerId, containerSrcDir, envList,
-                    buildspec.installCommands(), timeoutMinutes, stopFlag);
-            if (installResult.stopped()) { finishStopped(build); return; }
-            if (installResult.failed()) {
-                completePhaseWithError(build, "INSTALL", "FAILED", installResult.errorMessage());
-                buildFailed = true;
-            } else {
-                completePhase(build, "INSTALL", "SUCCEEDED");
-            }
-
-            // PRE_BUILD
-            if (!buildFailed) {
-                if (stopFlag.get()) { finishStopped(build); return; }
-                beginPhase(build, "PRE_BUILD");
-                build.setCurrentPhase("PRE_BUILD");
-                PhaseResult preBuildResult = runPhase(containerId, containerSrcDir, envList,
-                        buildspec.preBuildCommands(), timeoutMinutes, stopFlag);
-                if (preBuildResult.stopped()) { finishStopped(build); return; }
-                if (preBuildResult.failed()) {
-                    completePhaseWithError(build, "PRE_BUILD", "FAILED", preBuildResult.errorMessage());
-                    buildFailed = true;
-                } else {
-                    completePhase(build, "PRE_BUILD", "SUCCEEDED");
-                }
-            } else {
-                skipPhase(build, "PRE_BUILD");
-            }
-
-            // BUILD
-            if (!buildFailed) {
-                if (stopFlag.get()) { finishStopped(build); return; }
-                beginPhase(build, "BUILD");
-                build.setCurrentPhase("BUILD");
-                PhaseResult buildResult = runPhase(containerId, containerSrcDir, envList,
-                        buildspec.buildCommands(), timeoutMinutes, stopFlag);
-                if (buildResult.stopped()) { finishStopped(build); return; }
-                if (buildResult.failed()) {
-                    completePhaseWithError(build, "BUILD", "FAILED", buildResult.errorMessage());
-                    buildFailed = true;
-                } else {
-                    completePhase(build, "BUILD", "SUCCEEDED");
-                }
-            } else {
-                skipPhase(build, "BUILD");
-            }
-
-            // POST_BUILD — always runs unless container was killed
-            if (stopFlag.get()) { finishStopped(build); return; }
-            beginPhase(build, "POST_BUILD");
-            build.setCurrentPhase("POST_BUILD");
-            PhaseResult postBuildResult = runPhase(containerId, containerSrcDir, envList,
-                    buildspec.postBuildCommands(), timeoutMinutes, stopFlag);
-            if (postBuildResult.stopped()) { finishStopped(build); return; }
-            if (postBuildResult.failed()) {
-                completePhaseWithError(build, "POST_BUILD", "FAILED", postBuildResult.errorMessage());
-                buildFailed = true;
-            } else {
-                completePhase(build, "POST_BUILD", "SUCCEEDED");
-            }
-
-            // UPLOAD_ARTIFACTS
-            beginPhase(build, "UPLOAD_ARTIFACTS");
-            build.setCurrentPhase("UPLOAD_ARTIFACTS");
-            try {
-                // Pull the working directory out of the container into the local workspace,
-                // then upload matching files to S3. This works regardless of whether Floci
-                // itself is running inside a container.
-                copyArtifactsFromContainer(containerId, containerSrcDir, workspace);
-                uploadArtifacts(region, build, project, buildspec.artifacts(), workspace);
-                completePhase(build, "UPLOAD_ARTIFACTS", "SUCCEEDED");
-            } catch (Exception e) {
-                LOG.warnv("Artifact upload failed for build {0}: {1}", buildId, e.getMessage());
-                completePhaseWithError(build, "UPLOAD_ARTIFACTS", "FAILED", e.getMessage());
-            }
-
-            // FINALIZING
-            beginPhase(build, "FINALIZING");
-            build.setCurrentPhase("FINALIZING");
-            completePhase(build, "FINALIZING", "SUCCEEDED");
-
-            // COMPLETED
-            beginPhase(build, "COMPLETED");
-            build.setCurrentPhase("COMPLETED");
-            completePhase(build, "COMPLETED", buildFailed ? "FAILED" : "SUCCEEDED");
-
-            build.setEndTime(System.currentTimeMillis() / 1000.0);
-            build.setBuildComplete(true);
-            build.setBuildStatus(buildFailed ? "FAILED" : "SUCCEEDED");
-
+            status = execute(region, build, project, buildspecOverride, stopFlag, executionId, resources);
         } catch (Exception e) {
             LOG.error("Unexpected error in build " + build.getId(), e);
-            build.setEndTime(System.currentTimeMillis() / 1000.0);
-            build.setBuildComplete(true);
-            build.setBuildStatus("FAULT");
-            build.setCurrentPhase("COMPLETED");
-            if (build.getPhases() == null) {
-                build.setPhases(new ArrayList<>());
-            }
-            boolean hasCompleted = build.getPhases().stream()
-                    .anyMatch(p -> "COMPLETED".equals(p.getPhaseType()));
-            if (!hasCompleted) {
-                BuildPhase completedPhase = new BuildPhase();
-                completedPhase.setPhaseType("COMPLETED");
-                completedPhase.setPhaseStatus("FAILED");
-                completedPhase.setStartTime(System.currentTimeMillis() / 1000.0);
-                completedPhase.setEndTime(System.currentTimeMillis() / 1000.0);
-                completedPhase.setDurationInSeconds(0L);
-                if (e.getMessage() != null) {
-                    completedPhase.setContexts(List.of(Map.of(
-                            "statusCode", "FAULT_ERROR",
-                            "message", e.getMessage()
-                    )));
-                }
-                build.getPhases().add(completedPhase);
-            }
+            recordFault(build, e);
+            status = "FAULT";
         } finally {
-            stopFlags.remove(executionId);
-            // However the build ended, its session ends with it.
-            roleCredentials.revoke(executionId);
-            if (containerId != null && runningContainers.remove(executionId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
-            } else if (logHandle != null) {
-                try { logHandle.close(); } catch (Exception ignored) {}
+            try {
+                release(executionId, resources);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not release what build {0} made: {1}", build.getId(), e.getMessage());
             }
-            roleCredentials.releaseAddress(executionId);
-            if (workspace != null) {
-                deleteDirectory(workspace);
+        }
+        finishWith(build, status);
+    }
+
+    /** What a build has made that its end removes. */
+    private static final class BuildResources {
+        private Path buildFolder;
+        private String agentId;
+        private String composeProject;
+        private Closeable logHandle;
+    }
+
+    /** Runs the build's phases; returns the status it ends with. */
+    private String execute(String region, Build build, Project project, String buildspecOverride,
+                           AtomicBoolean stopFlag, String executionId, BuildResources resources) throws Exception {
+        String buildId = build.getId();
+
+        beginPhase(build, "SUBMITTED");
+        completePhase(build, "SUBMITTED", "SUCCEEDED");
+
+        if (stopFlag.get()) {
+            return "STOPPED";
+        }
+
+        beginPhase(build, "QUEUED");
+        completePhase(build, "QUEUED", "SUCCEEDED");
+
+        if (stopFlag.get()) {
+            return "STOPPED";
+        }
+
+        // PROVISIONING: a host of the build's architecture, and the build's own session of its
+        // project's service role, before anything of its buildspec runs.
+        beginPhase(build, "PROVISIONING");
+        String architecture = hostArchitecture();
+        Optional<String> refusal = CodeBuildAgent.architectureRefusal(project.getName(),
+                environmentType(build, project), architecture);
+        if (refusal.isPresent()) {
+            completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", refusal.get());
+            return "FAILED";
+        }
+        Optional<String> agentImage = config.services().codebuild().agentImage()
+                .filter(image -> !image.isBlank())
+                .or(() -> CodeBuildAgent.imageFor(architecture));
+        if (agentImage.isEmpty()) {
+            completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR",
+                    "AWS publishes no CodeBuild local agent for this Docker host's architecture, "
+                            + architecture + ", and floci.services.codebuild.agent-image names none");
+            return "FAILED";
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().codebuild().dockerNetwork());
+        CodeBuildRoleCredentials.BuildCredentials credentials;
+        try {
+            credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
+                    accountOf(project), network);
+        } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
+            completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
+            return "FAILED";
+        } catch (RuntimeException e) {
+            completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
+            throw e;
+        }
+        completePhase(build, "PROVISIONING", "SUCCEEDED");
+
+        if (stopFlag.get()) {
+            return "STOPPED";
+        }
+
+        // DOWNLOAD_SOURCE: the source and the buildspec, in a working folder the agent binds from the
+        // Docker host. The agent completes the phase once its executor has read them.
+        beginPhase(build, "DOWNLOAD_SOURCE");
+        Owner owner = Owner.of(createWorkspace());
+        Path buildFolder = owner.give(Files.createTempDirectory(owner.folder(), folderPrefix(buildId)));
+        resources.buildFolder = buildFolder;
+        Path source = owner.give(Files.createDirectory(buildFolder.resolve("src")));
+        Path artifacts = owner.give(Files.createDirectory(buildFolder.resolve("artifacts")));
+
+        String buildspecContent;
+        ParsedBuildspec buildspec;
+        try {
+            buildspecContent = resolveAndAcquireSource(build, project, buildspecOverride, source, owner);
+            buildspec = BuildspecParser.parse(buildspecContent);
+        } catch (AwsException e) {
+            completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", e.getMessage());
+            return "FAILED";
+        }
+
+        String logGroup = "/aws/codebuild/" + project.getName();
+        String logStream = logStreamer.generateLogStreamName(buildId.replace(":", "/"));
+        Map<String, Object> logsMap = new HashMap<>();
+        logsMap.put("groupName", logGroup);
+        logsMap.put("streamName", logStream);
+        logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(),
+                "log-group:" + logGroup + ":log-stream:" + logStream).toString());
+        build.setLogs(logsMap);
+        String account = accountOf(project);
+        logStreamer.ensureLogGroupAndStreamForAccount(account, logGroup, logStream, region);
+
+        String image = build.getEnvironment() != null && build.getEnvironment().getImage() != null
+                ? build.getEnvironment().getImage()
+                : project.getEnvironment().getImage();
+        boolean privileged = (project.getEnvironment() != null
+                && Boolean.TRUE.equals(project.getEnvironment().getPrivilegedMode()))
+                || (build.getEnvironment() != null
+                && Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode()));
+
+        Path buildspecFile = owner.write(buildFolder.resolve("buildspec.yml"),
+                BuildspecParser.withoutResolvedVariables(buildspecContent));
+        ContainerSpec resolvers = containerBuilder.newContainer(image)
+                .withEmbeddedDns()
+                .withHostDockerInternalOnLinux()
+                .build();
+        CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(
+                buildVariables(region, build, project, buildspec, logStream, credentials.env()),
+                network.filter(ContainerSpec::acceptsLinkLocalIps),
+                resolvers.dnsServers() == null ? List.of() : resolvers.dnsServers(),
+                resolvers.extraHosts() == null ? List.of() : resolvers.extraHosts(),
+                agentLabels(buildId, region), buildspecFile);
+        Path override = owner.write(buildFolder.resolve("docker-compose.override.yml"),
+                CodeBuildAgent.composeOverride(plan));
+        Path wrapper = owner.write(buildFolder.resolve("docker-compose"), CodeBuildAgent.COMPOSE_WRAPPER);
+        Files.setPosixFilePermissions(wrapper, PosixFilePermissions.fromString("rwxr-xr-x"));
+        String composeProject = CodeBuildAgent.composeProject(buildFolder.getFileName().toString());
+        resources.composeProject = composeProject;
+
+        ContainerSpec agentSpec = agentSpec(agentImage.get(), image, privileged, build, source, artifacts,
+                wrapper, override, composeProject, region);
+        String agentId = startAgent(agentSpec, plan);
+        resources.agentId = agentId;
+        runningAgents.put(executionId, new RunningAgent(agentId, composeProject));
+
+        if (stopFlag.get()) {
+            return "STOPPED";
+        }
+
+        AgentPhases phases = new AgentPhases(build);
+        resources.logHandle = logStreamer.followLines(agentId, line -> {
+            Optional<String> logLine = CodeBuildAgent.buildLogLine(line);
+            if (logLine.isEmpty()) {
+                LOG.debugv("[codebuild:{0}] {1}", buildId, line);
+                return;
             }
+            LOG.infov("[codebuild:{0}] {1}", buildId, logLine.get());
+            logStreamer.streamToCloudWatchLogsForAccount(account, logGroup, logStream, region, logLine.get());
+            phases.accept(logLine.get());
+        });
+
+        int timeoutMinutes = build.getTimeoutInMinutes() != null ? build.getTimeoutInMinutes() : 60;
+        AgentExit exit = awaitAgent(agentId, timeoutMinutes);
+        if (resources.logHandle != null) {
+            lifecycleManager.closeLogStreamAfterContainerStop(resources.logHandle);
+            resources.logHandle = null;
+        }
+
+        if (stopFlag.get()) {
+            return "STOPPED";
+        }
+        if (exit.timedOut()) {
+            phases.timedOut(timeoutMinutes);
+            return "TIMED_OUT";
+        }
+        if (!phases.sawPhase()) {
+            completePhaseWithError(build, "DOWNLOAD_SOURCE", "FAILED", "FAULT_ERROR",
+                    "CodeBuild's local agent " + agentImage.get() + " ended with exit code " + exit.exitCode()
+                            + " and ran no phase");
+            return "FAULT";
+        }
+        boolean buildFailed = phases.failed();
+
+        if (phases.succeeded("UPLOAD_ARTIFACTS")) {
+            try {
+                uploadArtifacts(build, project, buildspec.artifacts(), artifacts.resolve("artifacts.zip"));
+            } catch (Exception e) {
+                LOG.warnv("Artifact upload failed for build {0}: {1}", buildId, e.getMessage());
+                completePhaseWithError(build, "UPLOAD_ARTIFACTS", "FAILED", "CLIENT_ERROR", e.getMessage());
+                buildFailed = true;
+            }
+        }
+
+        beginPhase(build, "FINALIZING");
+        completePhase(build, "FINALIZING", "SUCCEEDED");
+        beginPhase(build, "COMPLETED");
+        completePhase(build, "COMPLETED", buildFailed ? "FAILED" : "SUCCEEDED");
+        return buildFailed ? "FAILED" : "SUCCEEDED";
+    }
+
+    /** Records an unexpected failure as the build's COMPLETED phase, failed with its message. */
+    private static void recordFault(Build build, Exception e) {
+        if (build.getPhases() == null) {
+            build.setPhases(new ArrayList<>());
+        }
+        boolean hasCompleted = build.getPhases().stream()
+                .anyMatch(p -> "COMPLETED".equals(p.getPhaseType()));
+        if (!hasCompleted) {
+            BuildPhase completedPhase = new BuildPhase();
+            completedPhase.setPhaseType("COMPLETED");
+            completedPhase.setPhaseStatus("FAILED");
+            completedPhase.setStartTime(System.currentTimeMillis() / 1000.0);
+            completedPhase.setEndTime(System.currentTimeMillis() / 1000.0);
+            completedPhase.setDurationInSeconds(0L);
+            if (e.getMessage() != null) {
+                completedPhase.setContexts(List.of(Map.of(
+                        "statusCode", "FAULT_ERROR",
+                        "message", e.getMessage()
+                )));
+            }
+            build.getPhases().add(completedPhase);
         }
     }
 
-    private String resolveAndAcquireSource(String region, Build build, Project project,
-                                           String buildspecOverride, Path workspace) throws IOException {
+    /**
+     * Removes what the build made, however it ended: its session first, then its agent, then what the
+     * agent's docker-compose started, which an agent stopped or timed out mid-build leaves running and
+     * which holds the project's volumes, and last its working folder, once nothing that could write into
+     * it is running.
+     */
+    private void release(String executionId, BuildResources resources) {
+        stopFlags.remove(executionId);
+        roleCredentials.revoke(executionId);
+        if (resources.agentId != null) {
+            runningAgents.remove(executionId);
+            lifecycleManager.stopAndRemove(resources.agentId, resources.logHandle);
+        } else if (resources.logHandle != null) {
+            lifecycleManager.closeLogStreamAfterContainerStop(resources.logHandle);
+        }
+        if (resources.composeProject != null) {
+            removeComposeProject(resources.composeProject);
+        }
+        roleCredentials.releaseAddress(executionId);
+        if (resources.buildFolder != null) {
+            deleteDirectory(resources.buildFolder);
+        }
+    }
+
+    /** The type of environment the build runs on: the start's override, else the project's. */
+    private static String environmentType(Build build, Project project) {
+        if (build.getEnvironment() != null && build.getEnvironment().getType() != null) {
+            return build.getEnvironment().getType();
+        }
+        return project.getEnvironment() != null ? project.getEnvironment().getType() : null;
+    }
+
+    /**
+     * The Docker host's architecture, which every build runs on: the daemon's own word for it, or this
+     * JVM's where the daemon does not answer, as nothing here runs emulated.
+     */
+    String hostArchitecture() {
+        String known = hostArchitecture;
+        if (known != null) {
+            return known;
+        }
+        String reported = null;
+        try {
+            reported = dockerClient.infoCmd().exec().getArchitecture();
+        } catch (RuntimeException e) {
+            LOG.debugv("Docker did not report its architecture: {0}", e.getMessage());
+        }
+        if (reported == null || reported.isBlank()) {
+            reported = System.getProperty("os.arch");
+        }
+        known = CodeBuildAgent.normalizeArchitecture(reported);
+        hostArchitecture = known;
+        return known;
+    }
+
+    private Path createWorkspace() throws IOException {
+        Path workspace = CodeBuildAgent.workspace(config.services().codebuild().agentWorkspace(),
+                Optional.ofNullable(System.getenv("SLUICE_TMP")), config.port());
+        Files.createDirectories(workspace);
+        return workspace;
+    }
+
+    private static String folderPrefix(String buildId) {
+        return buildId.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "-") + "-";
+    }
+
+    /** Floci's labels and the build's identity, on the agent's containers and its project's volumes. */
+    private Map<String, String> agentLabels(String buildId, String region) {
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
+        labels.putAll(ContainerStorageHelper.resourceIdentityLabels(
+                "codebuild", buildId, regionResolver.getAccountId(), region));
+        return ContainerStorageHelper.CONTAINER_LABEL_ALIASES.withLegacyAliases(labels);
+    }
+
+    /** The agent's container, handed what {@code codebuild_build.sh} hands it. */
+    private ContainerSpec agentSpec(String agentImage, String image, boolean privileged, Build build, Path source,
+                                    Path artifacts, Path wrapper, Path override, String composeProject,
+                                    String region) {
+        String resolvedAgentImage = containerBuilder.resolveImage(agentImage);
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(agentImage)
+                .withEnv("IMAGE_NAME", image)
+                .withEnv("SOURCE", source.toString())
+                .withEnv("ARTIFACTS", artifacts.toString())
+                .withEnv("BUILDSPEC", CodeBuildAgent.BUILDSPEC_PATH)
+                .withEnv("INITIATOR", build.getInitiator() != null ? build.getInitiator() : "user")
+                .withEnv("LOCAL_AGENT_IMAGE_NAME", resolvedAgentImage != null ? resolvedAgentImage : agentImage)
+                .withEnv("COMPOSE_PROJECT_NAME", composeProject)
+                .withBind(dockerSocket(), DEFAULT_DOCKER_SOCKET)
+                .withReadOnlyBind(wrapper.toString(), CodeBuildAgent.WRAPPER_PATH)
+                .withReadOnlyBind(override.toString(), CodeBuildAgent.OVERRIDE_PATH)
+                .withDockerNetwork(config.services().codebuild().dockerNetwork())
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "codebuild", build.getId(), regionResolver.getAccountId(), region));
+        if (privileged) {
+            builder.withEnv("DOCKER_PRIVILEGED_MODE", "TRUE");
+        }
+        return builder.build();
+    }
+
+    /** The Docker daemon's socket on its host, which the agent's docker-compose drives. */
+    private String dockerSocket() {
+        String host = config.docker() != null ? config.docker().dockerHost() : null;
+        return host != null && host.startsWith(UNIX_SCHEME)
+                ? host.substring(UNIX_SCHEME.length()) : DEFAULT_DOCKER_SOCKET;
+    }
+
+    /** Starts the agent's container; returns its id. */
+    String startAgent(ContainerSpec agentSpec, CodeBuildAgent.Plan plan) {
+        return lifecycleManager.createAndStart(agentSpec).containerId();
+    }
+
+    /** Waits for the agent's container to end, for no longer than the build's timeout. */
+    AgentExit awaitAgent(String containerId, int timeoutMinutes) {
+        try {
+            Integer status = dockerClient.waitContainerCmd(containerId)
+                    .exec(new WaitContainerResultCallback())
+                    .awaitStatusCode(timeoutMinutes, TimeUnit.MINUTES);
+            return new AgentExit(status, false);
+        } catch (DockerClientException e) {
+            LOG.debugv("CodeBuild agent {0} did not end within {1} minutes: {2}", containerId, timeoutMinutes,
+                    e.getMessage());
+            return new AgentExit(null, true);
+        }
+    }
+
+    /**
+     * Removes what the agent's docker-compose made for one build, its agent and build containers, then
+     * their network and volumes, which compose labels with the project. Best effort, each on its own: a
+     * build's end must not fail over its cleanup.
+     */
+    void removeComposeProject(String composeProject) {
+        List<String> selector = List.of(COMPOSE_PROJECT_LABEL + "=" + composeProject);
+        try {
+            for (Container container : dockerClient.listContainersCmd().withShowAll(true)
+                    .withLabelFilter(selector).exec()) {
+                try {
+                    dockerClient.removeContainerCmd(container.getId()).withForce(true).withRemoveVolumes(true).exec();
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove container {0} of {1}: {2}", container.getId(), composeProject,
+                            e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not list the containers of {0}: {1}", composeProject, e.getMessage());
+        }
+        try {
+            for (Network network : dockerClient.listNetworksCmd().withFilter("label", selector).exec()) {
+                try {
+                    dockerClient.removeNetworkCmd(network.getId()).exec();
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove network {0} of {1}: {2}", network.getName(), composeProject,
+                            e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not list the networks of {0}: {1}", composeProject, e.getMessage());
+        }
+        try {
+            List<String> volumes = new ArrayList<>();
+            dockerClient.listVolumesCmd().withFilter("label", selector).exec().getVolumes()
+                    .forEach(volume -> volumes.add(volume.getName()));
+            for (String volume : volumes) {
+                try {
+                    dockerClient.removeVolumeCmd(volume).exec();
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove volume {0} of {1}: {2}", volume, composeProject, e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not list the volumes of {0}: {1}", composeProject, e.getMessage());
+        }
+    }
+
+    private String resolveAndAcquireSource(Build build, Project project, String buildspecOverride, Path source,
+                                           Owner owner) throws IOException {
         String sourceType = project.getSource() != null ? project.getSource().getType() : "NO_SOURCE";
 
         if ("S3".equals(sourceType) && project.getSource().getLocation() != null) {
@@ -438,7 +585,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                 try {
                     S3Object obj = s3Service.getObject(bucket, key);
                     if (obj != null && obj.getData() != null) {
-                        extractZip(obj.getData(), workspace);
+                        extractZip(obj.getData(), source, owner);
                     }
                 } catch (Exception e) {
                     LOG.warnv("Could not acquire S3 source {0}: {1}", location, e.getMessage());
@@ -453,11 +600,11 @@ public class CodeBuildRunner implements ContainerTeardown {
                 && !project.getSource().getBuildspec().isBlank()) {
             return project.getSource().getBuildspec();
         }
-        Path yml = workspace.resolve("buildspec.yml");
+        Path yml = source.resolve("buildspec.yml");
         if (Files.exists(yml)) {
             return Files.readString(yml);
         }
-        Path yaml = workspace.resolve("buildspec.yaml");
+        Path yaml = source.resolve("buildspec.yaml");
         if (Files.exists(yaml)) {
             return Files.readString(yaml);
         }
@@ -473,18 +620,20 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    private List<String> buildEnvList(String region, Build build, Project project,
-                                      ParsedBuildspec buildspec, String logStream,
-                                      Map<String, String> credentials) {
+    /**
+     * The variables Floci hands the build, each as the agent hands a project's: what CodeBuild sets that
+     * the agent does not, the role's session, the buildspec's Parameter Store and Secrets Manager entries,
+     * then the project's and the start's, each later one taking a name's place. The buildspec's own
+     * {@code env.variables} are the agent's to apply, under all of these, as CodeBuild orders them.
+     */
+    private Map<String, String> buildVariables(String region, Build build, Project project,
+                                               ParsedBuildspec buildspec, String logStream,
+                                               Map<String, String> credentials) {
         Map<String, String> env = new LinkedHashMap<>();
 
         env.put("CODEBUILD_BUILD_ID", build.getId());
         env.put("CODEBUILD_BUILD_ARN", build.getArn());
         env.put("CODEBUILD_BUILD_NUMBER", String.valueOf(build.getBuildNumber()));
-        env.put("CODEBUILD_BUILD_IMAGE", build.getEnvironment() != null && build.getEnvironment().getImage() != null
-                ? build.getEnvironment().getImage() : project.getEnvironment().getImage());
-        env.put("CODEBUILD_INITIATOR", "user");
-        env.put("CODEBUILD_SRC_DIR", "/codebuild/output/src/src");
         env.put("CODEBUILD_LOG_PATH", logStream);
         env.put("AWS_DEFAULT_REGION", region);
         env.put("AWS_REGION", region);
@@ -492,8 +641,6 @@ public class CodeBuildRunner implements ContainerTeardown {
         // The project's role, ahead of everything a project, its buildspec or the build's start
         // sets, which still reaches the build as CodeBuild's own variables do.
         env.putAll(credentials);
-
-        env.putAll(buildspec.envVariables());
 
         for (Map.Entry<String, String> e : buildspec.parameterStoreVars().entrySet()) {
             try {
@@ -517,7 +664,9 @@ public class CodeBuildRunner implements ContainerTeardown {
             for (Map<String, String> v : project.getEnvironment().getEnvironmentVariables()) {
                 String name = v.get("name");
                 String value = v.get("value");
-                if (name != null) { env.put(name, value != null ? value : ""); }
+                if (name != null) {
+                    env.put(name, value != null ? value : "");
+                }
             }
         }
 
@@ -525,13 +674,12 @@ public class CodeBuildRunner implements ContainerTeardown {
             for (Map<String, String> v : build.getEnvironment().getEnvironmentVariables()) {
                 String name = v.get("name");
                 String value = v.get("value");
-                if (name != null) { env.put(name, value != null ? value : ""); }
+                if (name != null) {
+                    env.put(name, value != null ? value : "");
+                }
             }
         }
-
-        List<String> result = new ArrayList<>();
-        env.forEach((k, v) -> result.add(k + "=" + (v != null ? v : "")));
-        return result;
+        return env;
     }
 
     String resolveEndpointUrl() {
@@ -543,178 +691,18 @@ public class CodeBuildRunner implements ContainerTeardown {
         }
     }
 
-    // Copies files from the local workspace into the container's working directory.
-    // Skips silently when the workspace is empty (e.g. NO_SOURCE builds).
-    void copySourceToContainer(String containerId, Path sourceDir, String remotePath) {
-        copySourceToContainer(containerId, sourceDir, remotePath, RetryingTarCopier.DEFAULT_BACKOFF_MS);
-    }
-
-    void copySourceToContainer(String containerId, Path sourceDir, String remotePath, long backoffMillis) {
-        if (!Files.exists(sourceDir)) return;
-        try (Stream<Path> ls = Files.list(sourceDir)) {
-            if (ls.findAny().isEmpty()) return;
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not inspect CodeBuild source directory " + sourceDir, e);
-        }
-
-        RetryingTarCopier.copyStreamed(dockerClient, containerId, remotePath,
-                "codebuild-source", out -> createTarFromDir(sourceDir, out),
-                RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, backoffMillis);
-    }
-
-    // Pulls the container's working directory back into the local workspace so
-    // uploadArtifacts can read the build outputs. Docker cp adds the last path
-    // component as a top-level directory in the tar; we strip it on extraction.
-    private void copyArtifactsFromContainer(String containerId, String containerPath, Path destDir)
+    /**
+     * Uploads what the agent collected, the {@code artifacts.zip} it writes of the buildspec's
+     * {@code artifacts} section, as the project's artifacts say: the archive itself, or each file in it
+     * for {@code NONE} packaging.
+     */
+    private void uploadArtifacts(Build build, Project project, ParsedArtifacts artifacts, Path archive)
             throws IOException {
-        try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, containerPath).exec();
-             TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
-
-            String stripPrefix = null;
-            TarArchiveEntry entry;
-            while ((entry = tar.getNextEntry()) != null) {
-                if (!tar.canReadEntryData(entry)) continue;
-
-                String name = entry.getName();
-
-                if (stripPrefix == null) {
-                    if (entry.isDirectory()) {
-                        stripPrefix = name.endsWith("/") ? name : name + "/";
-                        continue;
-                    } else {
-                        stripPrefix = "";
-                    }
-                }
-
-                if (!stripPrefix.isEmpty() && name.startsWith(stripPrefix)) {
-                    name = name.substring(stripPrefix.length());
-                }
-                if (name.isEmpty()) continue;
-
-                Path target = destDir.resolve(name).normalize();
-                if (!target.startsWith(destDir)) continue; // path traversal
-
-                if (entry.isDirectory()) {
-                    Files.createDirectories(target);
-                } else {
-                    Files.createDirectories(target.getParent());
-                    Files.write(target, tar.readAllBytes());
-                }
-            }
-        } catch (Exception e) {
-            LOG.warnv("Could not copy artifacts from container {0}: {1}", containerId, e.getMessage());
-        }
-    }
-
-    private void createTarFromDir(Path dir, OutputStream out) throws IOException {
-        try (TarArchiveOutputStream tar = newTarStream(out);
-             Stream<Path> stream = Files.walk(dir)) {
-            for (Path path : (Iterable<Path>) stream::iterator) {
-                if (path.equals(dir)) continue;
-                String entryName = dir.relativize(path).toString();
-                if (Files.isDirectory(path)) {
-                    TarArchiveEntry entry = new TarArchiveEntry(entryName + "/");
-                    tar.putArchiveEntry(entry);
-                    tar.closeArchiveEntry();
-                } else {
-                    TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                    entry.setSize(Files.size(path));
-                    entry.setMode(0644);
-                    tar.putArchiveEntry(entry);
-                    try (InputStream fis = Files.newInputStream(path)) {
-                        fis.transferTo(tar);
-                    }
-                    tar.closeArchiveEntry();
-                }
-            }
-        }
-    }
-
-    private static TarArchiveOutputStream newTarStream(OutputStream out) {
-        TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
-        tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-        tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);
-        return tar;
-    }
-
-    PhaseResult runPhase(String containerId, String workDir, List<String> env,
-                                 List<String> commands, int timeoutMinutes, AtomicBoolean stopFlag) {
-        if (commands.isEmpty()) {
-            return PhaseResult.ofSuccess();
-        }
-        if (stopFlag.get()) {
-            return PhaseResult.ofStopped();
-        }
-
-        String script = String.join("\n", commands);
-        String[] cmd = {"sh", "-e", "-c", script};
-
-        try {
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withWorkingDir(workDir)
-                    .withEnv(env)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec()
-                    .getId();
-
-            CountDownLatch latch = new CountDownLatch(1);
-            OutputTail outputCapture = new OutputTail();
-
-            dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-                @Override
-                public void onNext(Frame frame) {
-                    if (frame.getPayload() != null) {
-                        outputCapture.write(frame.getPayload());
-                    }
-                }
-                @Override
-                public void onComplete() { latch.countDown(); }
-                @Override
-                public void onError(Throwable t) { latch.countDown(); }
-            });
-
-            boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
-            if (!completed) {
-                return PhaseResult.ofFailure("Phase timed out after " + timeoutMinutes + " minutes");
-            }
-            if (stopFlag.get()) {
-                return PhaseResult.ofStopped();
-            }
-
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-            if (exitCode != null && exitCode != 0) {
-                String output = outputCapture.asString().stripTrailing();
-                String msg = "Exit code " + exitCode;
-                if (!output.isBlank()) {
-                    msg += ": " + output.substring(Math.max(0, output.length() - FAILURE_OUTPUT_CHARS));
-                }
-                return PhaseResult.ofFailure(msg);
-            }
-            return PhaseResult.ofSuccess();
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return PhaseResult.ofStopped();
-        } catch (Exception e) {
-            if (stopFlag.get()) {
-                return PhaseResult.ofStopped();
-            }
-            return PhaseResult.ofFailure(e.getMessage());
-        }
-    }
-
-    private void uploadArtifacts(String region, Build build, Project project,
-                                 ParsedArtifacts artifacts, Path workspace) throws IOException {
         String type = artifacts.type();
         if ("NO_ARTIFACTS".equals(type) && project.getArtifacts() != null) {
             type = project.getArtifacts().getType();
         }
-        if (type == null || "NO_ARTIFACTS".equals(type) || "CODEPIPELINE".equals(type)) {
-            return;
-        }
-        if (!"S3".equals(type)) {
+        if (!"S3".equals(type) || !Files.isRegularFile(archive)) {
             return;
         }
 
@@ -729,94 +717,32 @@ public class CodeBuildRunner implements ContainerTeardown {
             return;
         }
 
-        List<String> filePatterns = artifacts.files();
-        if (filePatterns.isEmpty()) {
-            return;
-        }
-
-        Path baseDir = workspace;
-        if (artifacts.baseDirectory() != null) {
-            baseDir = workspace.resolve(artifacts.baseDirectory());
-        }
-
-        List<Path> matchedFiles = collectFiles(baseDir, filePatterns);
-        if (matchedFiles.isEmpty()) {
-            LOG.warnv("No artifact files matched patterns {0} in {1} for build {2}",
-                    filePatterns, baseDir, build.getId());
-            return;
-        }
-
         int slash = location.indexOf('/');
         String bucket = slash > 0 ? location.substring(0, slash) : location;
         String prefix = slash > 0 ? location.substring(slash + 1) : "";
         String artifactName = artifacts.name() != null ? artifacts.name()
                 : project.getName() + "-" + build.getBuildNumber();
 
-        boolean isNone = "NONE".equalsIgnoreCase(packaging);
-        if (isNone) {
-            for (Path file : matchedFiles) {
-                String relative = artifacts.discardPaths()
-                        ? file.getFileName().toString()
-                        : baseDir.relativize(file).toString();
-                String key = prefix.isBlank() ? relative : prefix + "/" + relative;
-                byte[] data = Files.readAllBytes(file);
-                String contentType = guessContentType(file.getFileName().toString());
-                s3Service.putObject(bucket, key, data, contentType, Map.of());
+        byte[] zip = Files.readAllBytes(archive);
+        if ("NONE".equalsIgnoreCase(packaging)) {
+            try (ZipInputStream entries = new ZipInputStream(new ByteArrayInputStream(zip))) {
+                ZipEntry entry;
+                while ((entry = entries.getNextEntry()) != null) {
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    String key = prefix.isBlank() ? entry.getName() : prefix + "/" + entry.getName();
+                    byte[] data = entries.readAllBytes();
+                    s3Service.putObject(bucket, key, data, guessContentType(entry.getName()), Map.of());
+                }
             }
         } else {
             String key = prefix.isBlank() ? artifactName + ".zip" : prefix + "/" + artifactName + ".zip";
-            byte[] zipBytes = zipFiles(baseDir, matchedFiles, artifacts.discardPaths());
-            s3Service.putObject(bucket, key, zipBytes, "application/zip", Map.of());
+            s3Service.putObject(bucket, key, zip, "application/zip", Map.of());
         }
     }
 
-    private List<Path> collectFiles(Path baseDir, List<String> patterns) throws IOException {
-        List<Path> result = new ArrayList<>();
-        if (!Files.exists(baseDir)) {
-            LOG.warnv("Artifact base directory does not exist: {0}", baseDir);
-            return result;
-        }
-        for (String pattern : patterns) {
-            if ("**/*".equals(pattern) || "**".equals(pattern)) {
-                try (Stream<Path> stream = Files.walk(baseDir)) {
-                    stream.filter(Files::isRegularFile).forEach(result::add);
-                }
-            } else if (!pattern.contains("*") && !pattern.contains("?")
-                    && !pattern.contains("{") && !pattern.contains("[")) {
-                // Plain filename — resolve directly instead of using PathMatcher
-                Path direct = baseDir.resolve(pattern);
-                if (Files.isRegularFile(direct)) {
-                    result.add(direct);
-                } else {
-                    LOG.warnv("Artifact file not found: {0}", direct);
-                }
-            } else {
-                PathMatcher matcher = baseDir.getFileSystem().getPathMatcher("glob:" + pattern);
-                try (Stream<Path> stream = Files.walk(baseDir)) {
-                    stream.filter(Files::isRegularFile)
-                            .filter(p -> matcher.matches(baseDir.relativize(p)))
-                            .forEach(result::add);
-                }
-            }
-        }
-        return result;
-    }
-
-    private byte[] zipFiles(Path baseDir, List<Path> files, boolean discardPaths) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(bos)) {
-            for (Path file : files) {
-                String entryName = discardPaths ? file.getFileName().toString()
-                        : baseDir.relativize(file).toString();
-                zos.putNextEntry(new ZipEntry(entryName));
-                zos.write(Files.readAllBytes(file));
-                zos.closeEntry();
-            }
-        }
-        return bos.toByteArray();
-    }
-
-    private void extractZip(byte[] data, Path dest) throws IOException {
+    private void extractZip(byte[] data, Path dest, Owner owner) throws IOException {
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(data))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
@@ -825,17 +751,17 @@ public class CodeBuildRunner implements ContainerTeardown {
                     continue; // zip slip protection
                 }
                 if (entry.isDirectory()) {
-                    Files.createDirectories(target);
+                    owner.giveAll(dest, Files.createDirectories(target));
                 } else {
-                    Files.createDirectories(target.getParent());
-                    Files.write(target, zis.readAllBytes());
+                    owner.giveAll(dest, Files.createDirectories(target.getParent()));
+                    owner.give(Files.write(target, zis.readAllBytes()));
                 }
                 zis.closeEntry();
             }
         }
     }
 
-    private void beginPhase(Build build, String phaseType) {
+    private static void beginPhase(Build build, String phaseType) {
         BuildPhase phase = new BuildPhase();
         phase.setPhaseType(phaseType);
         phase.setPhaseStatus("IN_PROGRESS");
@@ -844,7 +770,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         build.setCurrentPhase(phaseType);
     }
 
-    private void completePhase(Build build, String phaseType, String status) {
+    private static void completePhase(Build build, String phaseType, String status) {
         findPhase(build, phaseType).ifPresent(p -> {
             double end = System.currentTimeMillis() / 1000.0;
             p.setPhaseStatus(status);
@@ -853,12 +779,12 @@ public class CodeBuildRunner implements ContainerTeardown {
         });
     }
 
-    private void completePhaseWithError(Build build, String phaseType, String status, String message) {
+    private static void completePhaseWithError(Build build, String phaseType, String status, String message) {
         completePhaseWithError(build, phaseType, status, "COMMAND_EXECUTION_ERROR", message);
     }
 
-    private void completePhaseWithError(Build build, String phaseType, String status, String statusCode,
-                                        String message) {
+    private static void completePhaseWithError(Build build, String phaseType, String status, String statusCode,
+                                               String message) {
         findPhase(build, phaseType).ifPresent(p -> {
             double end = System.currentTimeMillis() / 1000.0;
             p.setPhaseStatus(status);
@@ -871,32 +797,14 @@ public class CodeBuildRunner implements ContainerTeardown {
         });
     }
 
-    private void skipPhase(Build build, String phaseType) {
-        BuildPhase phase = new BuildPhase();
-        phase.setPhaseType(phaseType);
-        phase.setPhaseStatus("SUCCEEDED");
-        double now = System.currentTimeMillis() / 1000.0;
-        phase.setStartTime(now);
-        phase.setEndTime(now);
-        phase.setDurationInSeconds(0L);
-        build.getPhases().add(phase);
-    }
-
-    private void finishStopped(Build build) {
+    private static void finishWith(Build build, String status) {
         build.setEndTime(System.currentTimeMillis() / 1000.0);
         build.setBuildComplete(true);
-        build.setBuildStatus("STOPPED");
+        build.setBuildStatus(status);
         build.setCurrentPhase("COMPLETED");
     }
 
-    private void finishFailed(Build build) {
-        build.setEndTime(System.currentTimeMillis() / 1000.0);
-        build.setBuildComplete(true);
-        build.setBuildStatus("FAILED");
-        build.setCurrentPhase("COMPLETED");
-    }
-
-    private Optional<BuildPhase> findPhase(Build build, String phaseType) {
+    private static Optional<BuildPhase> findPhase(Build build, String phaseType) {
         return build.getPhases().stream()
                 .filter(p -> phaseType.equals(p.getPhaseType()))
                 .findFirst();
@@ -906,79 +814,139 @@ public class CodeBuildRunner implements ContainerTeardown {
         try {
             FileTrees.delete(path);
         } catch (IOException e) {
-            LOG.debugv("Could not delete workspace {0}: {1}", path, e.getMessage());
+            LOG.warnv("Could not delete the working folder {0}: {1}", path, e.getMessage());
         }
     }
 
     private static String guessContentType(String filename) {
-        if (filename.endsWith(".json")) { return "application/json"; }
-        if (filename.endsWith(".xml")) { return "application/xml"; }
-        if (filename.endsWith(".html")) { return "text/html"; }
+        if (filename.endsWith(".json")) {
+            return "application/json";
+        }
+        if (filename.endsWith(".xml")) {
+            return "application/xml";
+        }
+        if (filename.endsWith(".html")) {
+            return "text/html";
+        }
         return "text/plain";
     }
 
     /**
-     * The last bytes a phase printed. Only the tail reaches the failure message, so a phase that
-     * prints gigabytes of logs does not hold them all in the heap. Trailing whitespace is held
-     * apart until more output follows it, so a long run of blank lines cannot push the last
-     * error out of the tail before the message strips it. The tail keeps eight bytes for every
-     * character of the message, so it always decodes to more than {@link #FAILURE_OUTPUT_CHARS}
-     * characters and a character cut in half at its start never reaches the message.
+     * The build's phases as the agent's executor reports them in the build's log: {@code Entering phase X}
+     * as one starts, {@code Phase complete: X State: S} as it ends, and the context it ended with on the
+     * line after, a phase the log never said it entered begun as it ends. Read on the log's own thread
+     * while the build's waits on the agent.
      */
-    private static final class OutputTail {
-        private final ByteTail content = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
-        private final ByteTail trailingWhitespace = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
+    static final class AgentPhases {
 
-        synchronized void write(byte[] bytes) {
-            int contentEnd = bytes.length;
-            while (contentEnd > 0 && Character.isWhitespace(bytes[contentEnd - 1])) {
-                contentEnd--;
-            }
-            if (contentEnd > 0) {
-                content.append(trailingWhitespace.buffer, 0, trailingWhitespace.length);
-                trailingWhitespace.length = 0;
-                content.append(bytes, 0, contentEnd);
-            }
-            trailingWhitespace.append(bytes, contentEnd, bytes.length - contentEnd);
+        private static final Pattern ENTERING = Pattern.compile(".*\\bEntering phase ([A-Z_]+)\\s*$");
+        private static final Pattern COMPLETE =
+                Pattern.compile(".*\\bPhase complete: ([A-Z_]+) State: ([A-Z_]+)\\s*$");
+        private static final Pattern CONTEXT =
+                Pattern.compile(".*\\bPhase context status code: (.*?) Message: (.*)$");
+
+        private final Build build;
+        private String lastCompleted;
+        private boolean sawPhase;
+
+        AgentPhases(Build build) {
+            this.build = build;
         }
 
-        synchronized String asString() {
-            return new String(content.buffer, 0, content.length, StandardCharsets.UTF_8);
-        }
-    }
-
-    private static final class ByteTail {
-        private final byte[] buffer;
-        private int length;
-
-        ByteTail(int capacity) {
-            buffer = new byte[capacity];
-        }
-
-        void append(byte[] bytes, int offset, int count) {
-            if (count >= buffer.length) {
-                System.arraycopy(bytes, offset + count - buffer.length, buffer, 0, buffer.length);
-                length = buffer.length;
+        synchronized void accept(String line) {
+            Matcher entering = ENTERING.matcher(line);
+            if (entering.matches()) {
+                if (findPhase(build, entering.group(1)).isEmpty()) {
+                    beginPhase(build, entering.group(1));
+                }
                 return;
             }
-            int overflow = length + count - buffer.length;
-            if (overflow > 0) {
-                System.arraycopy(buffer, overflow, buffer, 0, length - overflow);
-                length -= overflow;
+            Matcher complete = COMPLETE.matcher(line);
+            if (complete.matches()) {
+                String phase = complete.group(1);
+                if (findPhase(build, phase).isEmpty()) {
+                    beginPhase(build, phase);
+                }
+                completePhase(build, phase, complete.group(2));
+                lastCompleted = phase;
+                sawPhase = true;
+                return;
             }
-            System.arraycopy(bytes, offset, buffer, length, count);
-            length += count;
+            Matcher context = CONTEXT.matcher(line);
+            if (context.matches() && lastCompleted != null && !context.group(1).isBlank()) {
+                String code = context.group(1).strip();
+                String message = context.group(2).strip();
+                findPhase(build, lastCompleted).ifPresent(phase -> phase.setContexts(
+                        List.of(Map.of("statusCode", code,
+                                "message", message.substring(0, Math.min(message.length(), 1024))))));
+            }
+        }
+
+        synchronized boolean sawPhase() {
+            return sawPhase;
+        }
+
+        synchronized boolean failed() {
+            return build.getPhases().stream().anyMatch(phase -> "FAILED".equals(phase.getPhaseStatus()));
+        }
+
+        synchronized boolean succeeded(String phaseType) {
+            return findPhase(build, phaseType).map(phase -> "SUCCEEDED".equals(phase.getPhaseStatus()))
+                    .orElse(false);
+        }
+
+        /** Ends the phase the build was in when its timeout came, as CodeBuild ends it. */
+        synchronized void timedOut(int timeoutMinutes) {
+            String current = build.getCurrentPhase();
+            if (current != null) {
+                completePhaseWithError(build, current, "TIMED_OUT", "BUILD_TIMED_OUT",
+                        "Build has timed out after " + timeoutMinutes + " minutes");
+            }
         }
     }
 
-    private enum PhaseStatus { SUCCEEDED, FAILED, STOPPED }
+    /**
+     * The owner of the folder the agent's working folders are made in, who is given each thing Floci
+     * makes there, while it is still empty: the agent binds them from the Docker host, where that folder
+     * is a host user's, and Floci in a container commonly runs as root. Best effort where Floci may not
+     * give a file away: what it makes is then its own user's.
+     */
+    record Owner(Path folder, Integer uid, Integer gid) {
 
-    record PhaseResult(PhaseStatus status, String errorMessage) {
-        boolean succeeded() { return status == PhaseStatus.SUCCEEDED; }
-        boolean failed() { return status == PhaseStatus.FAILED; }
-        boolean stopped() { return status == PhaseStatus.STOPPED; }
-        static PhaseResult ofSuccess() { return new PhaseResult(PhaseStatus.SUCCEEDED, null); }
-        static PhaseResult ofFailure(String msg) { return new PhaseResult(PhaseStatus.FAILED, msg); }
-        static PhaseResult ofStopped() { return new PhaseResult(PhaseStatus.STOPPED, null); }
+        static Owner of(Path folder) {
+            try {
+                return new Owner(folder, (Integer) Files.getAttribute(folder, "unix:uid"),
+                        (Integer) Files.getAttribute(folder, "unix:gid"));
+            } catch (IOException | UnsupportedOperationException | IllegalArgumentException e) {
+                LOG.debugv("Could not read the owner of {0}: {1}", folder, e.getMessage());
+                return new Owner(folder, null, null);
+            }
+        }
+
+        Path give(Path path) {
+            if (uid == null || gid == null) {
+                return path;
+            }
+            try {
+                Files.setAttribute(path, "unix:uid", uid);
+                Files.setAttribute(path, "unix:gid", gid);
+            } catch (IOException | UnsupportedOperationException | IllegalArgumentException e) {
+                LOG.debugv("Could not give {0} to {1}:{2}: {3}", path, uid, gid, e.getMessage());
+            }
+            return path;
+        }
+
+        /** Gives {@code path} and every folder between it and {@code root}. */
+        void giveAll(Path root, Path path) {
+            for (Path current = path; current != null && current.startsWith(root) && !current.equals(root);
+                 current = current.getParent()) {
+                give(current);
+            }
+        }
+
+        Path write(Path path, String content) throws IOException {
+            Files.writeString(give(Files.createFile(path)), content, StandardCharsets.UTF_8);
+            return path;
+        }
     }
 }

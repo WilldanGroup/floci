@@ -1302,6 +1302,19 @@ public interface EmulatorConfig {
         boolean enabled();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * The image of CodeBuild's local agent a build runs in. Unset, the agent AWS publishes for the
+         * Docker host's architecture, pinned by its digest.
+         */
+        Optional<String> agentImage();
+
+        /**
+         * The folder each build's working folder is made in, which the agent binds from the Docker host, so
+         * it is the same path on the host and in Floci's container. Unset, {@code floci-codebuild} under
+         * {@code $SLUICE_TMP} where that is set, else {@code /tmp/floci-codebuild-<floci.port>}.
+         */
+        Optional<String> agentWorkspace();
     }
 
     interface BatchServiceConfig {

@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.codebuild;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.core.common.AwsException;
 
@@ -16,6 +18,8 @@ import java.util.Map;
 class BuildspecParser {
 
     private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final List<String> RESOLVED_SECTIONS = List.of("parameter-store", "secrets-manager");
 
     record ParsedBuildspec(
             Map<String, String> envVariables,
@@ -63,6 +67,63 @@ class BuildspecParser {
             throw e;
         } catch (Exception e) {
             throw new AwsException("InvalidInputException", "Failed to parse buildspec: " + e.getMessage(), 400);
+        }
+    }
+
+    /**
+     * The buildspec without its {@code env.parameter-store} and {@code env.secrets-manager} sections, for
+     * a reader that is handed their values as variables and must not look them up itself. Every other line
+     * is kept as written, so a value reads as it did: a YAML buildspec loses the sections' lines alone, and
+     * only a JSON one is written again.
+     */
+    static String withoutResolvedVariables(String content) {
+        JsonNode parsed = parse(content, "Failed to parse buildspec");
+        if (!(parsed.path("env") instanceof ObjectNode env) || RESOLVED_SECTIONS.stream().noneMatch(env::has)) {
+            return content;
+        }
+        if (content.stripLeading().startsWith("{")) {
+            RESOLVED_SECTIONS.forEach(env::remove);
+            try {
+                return JSON.writeValueAsString(parsed);
+            } catch (JsonProcessingException e) {
+                throw new AwsException("InvalidInputException", "Failed to write buildspec: " + e.getMessage(), 400);
+            }
+        }
+        StringBuilder kept = new StringBuilder();
+        boolean inEnv = false;
+        int skippedIndent = -1;
+        for (String line : content.split("\n", -1)) {
+            String trimmed = line.strip();
+            int indent = line.length() - line.stripLeading().length();
+            if (skippedIndent >= 0) {
+                if (trimmed.isEmpty() || indent > skippedIndent) {
+                    continue;
+                }
+                skippedIndent = -1;
+            }
+            if (indent == 0 && !trimmed.isEmpty() && !trimmed.startsWith("#")) {
+                inEnv = trimmed.startsWith("env:");
+            }
+            if (inEnv && indent > 0 && RESOLVED_SECTIONS.stream().anyMatch(name -> trimmed.startsWith(name + ":"))) {
+                skippedIndent = indent;
+                continue;
+            }
+            kept.append(line).append('\n');
+        }
+        String result = kept.toString();
+        JsonNode reparsed = parse(result, "Failed to parse buildspec");
+        if (RESOLVED_SECTIONS.stream().anyMatch(name -> reparsed.path("env").has(name))) {
+            throw new AwsException("InvalidInputException",
+                    "Failed to parse buildspec: env.parameter-store or env.secrets-manager is not a block of its own", 400);
+        }
+        return result;
+    }
+
+    private static JsonNode parse(String content, String failure) {
+        try {
+            return YAML.readTree(content);
+        } catch (Exception e) {
+            throw new AwsException("InvalidInputException", failure + ": " + e.getMessage(), 400);
         }
     }
 

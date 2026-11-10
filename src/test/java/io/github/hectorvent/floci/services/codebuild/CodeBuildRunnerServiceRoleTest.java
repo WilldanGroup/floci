@@ -22,9 +22,10 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
-import java.io.Closeable;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -32,19 +33,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
-import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -56,9 +53,12 @@ import static org.mockito.Mockito.when;
  * A build runs as the role its project names as {@code serviceRole}, handed over the way CodeBuild
  * hands it: on a user-defined network, the container credentials endpoint's relative URI and no
  * keys; on the default bridge, where no container can hold a link-local address, the same session
- * as keys. A build whose role cannot be found never runs a command.
+ * as keys. A build whose role cannot be found never starts its agent.
  */
 class CodeBuildRunnerServiceRoleTest {
+
+    @TempDir
+    Path workspace;
 
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE_NAME = "build-role";
@@ -75,14 +75,13 @@ class CodeBuildRunnerServiceRoleTest {
 
         fixture.run();
 
-        List<String> env = fixture.env();
-        assertEquals(List.of(), env.stream().filter(e -> NO_KEYS.contains(name(e))).toList(),
+        Map<String, String> env = fixture.env();
+        assertEquals(List.of(), env.keySet().stream().filter(NO_KEYS::contains).toList(),
                 "the build's environment holds credentials of its own: " + env);
         String relativeUri = value(env, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
                 .orElseThrow(() -> new AssertionError("no AWS_CONTAINER_CREDENTIALS_RELATIVE_URI in " + env));
         assertTrue(relativeUri.startsWith("/"), relativeUri);
         assertTrue(!relativeUri.contains("://"), relativeUri);
-        verify(fixture.specBuilder()).withLinkLocalIp(startsWith("169.254."));
 
         SessionCredential session = fixture.issuedSession();
         assertEquals(ROLE_ARN, session.getRoleArn());
@@ -96,7 +95,7 @@ class CodeBuildRunnerServiceRoleTest {
 
         fixture.run();
 
-        List<String> env = fixture.env();
+        Map<String, String> env = fixture.env();
         SessionCredential session = fixture.issuedSession();
         assertEquals(Optional.of(session.getAccessKeyId()), value(env, "AWS_ACCESS_KEY_ID"), env::toString);
         assertEquals(Optional.of(session.getSecretAccessKey()), value(env, "AWS_SECRET_ACCESS_KEY"), env::toString);
@@ -105,7 +104,6 @@ class CodeBuildRunnerServiceRoleTest {
         assertEquals(ROLE_ARN, session.getRoleArn());
         assertEquals("AWSCodeBuild-7", session.getRoleSessionName());
         assertTrue(value(env, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").isEmpty(), env::toString);
-        verify(fixture.specBuilder(), never()).withLinkLocalIp(anyString());
     }
 
     @Test
@@ -116,7 +114,7 @@ class CodeBuildRunnerServiceRoleTest {
 
         fixture.run();
 
-        List<String> env = fixture.env();
+        Map<String, String> env = fixture.env();
         assertEquals(Optional.of("project-key"), value(env, "AWS_ACCESS_KEY_ID"), env::toString);
         assertEquals(Optional.of("project-token"), value(env, "AWS_SESSION_TOKEN"), env::toString);
     }
@@ -134,28 +132,15 @@ class CodeBuildRunnerServiceRoleTest {
                 .findFirst().orElseThrow(() -> new AssertionError("no failed phase in " + phases(build)));
         assertTrue(String.valueOf(failed.getContexts().getFirst().get("message")).contains(ROLE_ARN),
                 () -> failed.getPhaseType() + " " + failed.getContexts());
-        verify(fixture.lifecycle(), never()).createAndStart(any());
-        verify(fixture.runner(), never())
-                .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
+        verify(fixture.runner(), never()).startAgent(any(), any());
     }
 
     private static List<String> phases(Build build) {
         return build.getPhases().stream().map(p -> p.getPhaseType() + "=" + p.getPhaseStatus()).toList();
     }
 
-    private static String name(String entry) {
-        int equals = entry.indexOf('=');
-        return equals < 0 ? entry : entry.substring(0, equals);
-    }
-
-    private static Optional<String> value(List<String> env, String name) {
-        Optional<String> found = Optional.empty();
-        for (String entry : env) {
-            if (name.equals(name(entry))) {
-                found = Optional.of(entry.substring(name.length() + 1));
-            }
-        }
-        return found;
+    private static Optional<String> value(Map<String, String> env, String name) {
+        return Optional.ofNullable(env.get(name));
     }
 
     private Fixture fixture(Optional<String> network, boolean roleExists, List<Map<String, String>> projectVariables) {
@@ -170,11 +155,11 @@ class CodeBuildRunnerServiceRoleTest {
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("container", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
-        when(logStreamer.attach(eq("container"), anyString(), anyString(), anyString(), anyString()))
-                .thenReturn(mock(Closeable.class));
 
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().codebuild().dockerNetwork()).thenReturn(network);
+        when(config.services().codebuild().agentWorkspace()).thenReturn(Optional.of(workspace.toString()));
+        when(config.services().codebuild().agentImage()).thenReturn(Optional.of("agent:latest"));
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
@@ -195,8 +180,9 @@ class CodeBuildRunnerServiceRoleTest {
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
                 null, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint,
                 new CodeBuildRoleCredentials(credentials, server, proxy, new EcsTaskLinkLocalAddresses())));
-        doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
-                .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
+        doReturn("container").when(runner).startAgent(any(), any());
+        doReturn(new CodeBuildRunner.AgentExit(0, false)).when(runner).awaitAgent(anyString(), anyInt());
+        doNothing().when(runner).removeComposeProject(anyString());
 
         Build build = new Build();
         build.setId("project:7");
@@ -232,11 +218,11 @@ class CodeBuildRunnerServiceRoleTest {
             assertTrue(Boolean.TRUE.equals(build.getBuildComplete()), "build did not finish: " + phases(build));
         }
 
-        @SuppressWarnings("unchecked")
-        List<String> env() {
-            ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
-            verify(specBuilder, atLeastOnce()).withEnv(captor.capture());
-            return captor.getValue();
+        /** The variables the build's agent was handed. */
+        Map<String, String> env() {
+            ArgumentCaptor<CodeBuildAgent.Plan> captor = ArgumentCaptor.forClass(CodeBuildAgent.Plan.class);
+            verify(runner).startAgent(any(), captor.capture());
+            return captor.getValue().variables();
         }
 
         /** The one session the build's start registered with IAM. */

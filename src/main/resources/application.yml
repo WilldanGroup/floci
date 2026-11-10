@@ -870,6 +870,11 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+      # The image of CodeBuild's local agent; unset, the one AWS publishes for the Docker host's architecture, by digest.
+      # agent-image: public.ecr.aws/codebuild/local-builds@sha256:...
+      # Where each build's working folder is made, the same path on the Docker host and in Floci's container;
+      # unset, floci-codebuild under $SLUICE_TMP where that is set, else /tmp/floci-codebuild-<floci.port>.
+      # agent-workspace: /tmp/floci-codebuild
     sagemaker:
       enabled: true
       # docker-network: floci-network

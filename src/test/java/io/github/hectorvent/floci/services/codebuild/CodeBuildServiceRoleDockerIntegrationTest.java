@@ -32,8 +32,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -277,8 +279,8 @@ class CodeBuildServiceRoleDockerIntegrationTest {
         return false;
     }
 
-    private static <T> List<T> iterableToList(java.util.Iterator<T> iterator) {
-        java.util.ArrayList<T> list = new java.util.ArrayList<>();
+    private static <T> List<T> iterableToList(Iterator<T> iterator) {
+        List<T> list = new ArrayList<>();
         iterator.forEachRemaining(list::add);
         return list;
     }
