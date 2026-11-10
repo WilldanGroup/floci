@@ -112,7 +112,12 @@ class BuildspecParser {
         }
         String result = kept.toString();
         JsonNode reparsed = parse(result, "Failed to parse buildspec");
-        if (RESOLVED_SECTIONS.stream().anyMatch(name -> reparsed.path("env").has(name))) {
+        if (reparsed.path("env").isNull() || reparsed.path("env").isEmpty() && reparsed.path("env").isObject()) {
+            // CodeBuild refuses an env that holds nothing: "Expected Env to be non-empty".
+            result = result.replaceFirst("(?m)^env:[ \\t]*(#.*)?\\n", "");
+            reparsed = parse(result, "Failed to parse buildspec");
+        }
+        if (reparsed.has("env") && RESOLVED_SECTIONS.stream().anyMatch(reparsed.path("env")::has)) {
             throw new AwsException("InvalidInputException",
                     "Failed to parse buildspec: env.parameter-store or env.secrets-manager is not a block of its own", 400);
         }

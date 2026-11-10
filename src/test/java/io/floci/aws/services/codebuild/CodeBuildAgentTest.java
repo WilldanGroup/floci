@@ -135,6 +135,28 @@ class CodeBuildAgentTest {
     }
 
     @Test
+    void anEnvHoldingOnlyTheSectionsFlociResolvedGoesWithThem() {
+        String handed = BuildspecParser.withoutResolvedVariables("""
+                version: 0.2
+                env:
+                  parameter-store:
+                    TOKEN: /a/b
+                phases:
+                  build:
+                    commands:
+                      - echo "$TOKEN"
+                """);
+
+        assertEquals("""
+                version: 0.2
+                phases:
+                  build:
+                    commands:
+                      - echo "$TOKEN"
+                """, handed.stripTrailing() + "\n");
+    }
+
+    @Test
     void theBuildsContainerReadsItsSessionAtTheCredentialsAddressThroughARelayInItsOwnNetworkNamespace()
             throws Exception {
         CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(Map.of(), Optional.of("floci-net"),

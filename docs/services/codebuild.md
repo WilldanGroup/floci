@@ -93,6 +93,10 @@ A build whose project's role does not exist in the project's account fails in it
 
 Unlike CodeBuild, Floci does not evaluate the role's trust policy: a role that does not trust `codebuild.amazonaws.com` is still assumed.
 
+## Parameter Store and Secrets Manager Variables
+
+A variable of type `PARAMETER_STORE` names a parameter and one of type `SECRETS_MANAGER` a secret, and the build reads the value, not the name, as CodeBuild substitutes it at run time. That holds for a variable the project declares, one `StartBuild`'s `environmentVariablesOverride` declares, and the buildspec's `env.parameter-store` and `env.secrets-manager` entries; a secret is named as `secret-id:json-key:version-stage:version-id`, every part but the secret's name or ARN optional, and `json-key` reads one key of the secret's JSON. Floci reads each before the agent starts, as the project's service role: with `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` the role's policies must allow `ssm:GetParameters` on the parameter, or `secretsmanager:GetSecretValue` on the secret. One the role may not read, or whose parameter or secret does not exist, fails the build in its `DOWNLOAD_SOURCE` phase before any of its buildspec runs, with the status code `Decrypted Variables Error` the agent gives such a variable and a message naming the variable, then the service's code and words, for example `Variable TOKEN: AccessDeniedException: User: arn:aws:sts::000000000000:assumed-role/build-role/AWSCodeBuild-7 is not authorized to perform: ssm:GetParameters on resource: ...`.
+
 ## Buildspec Support
 
 Floci parses the `buildspec.yml` embedded in the project or provided via `buildspecOverride`. Supported fields:
