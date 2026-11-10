@@ -657,6 +657,9 @@ public class CloudFormationQueryHandler {
             if (s.getDeletionTime() != null) {
                 xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
             }
+            // A nested stack's parent and root; a root stack has neither, so neither element is written.
+            xml.elem("ParentId", s.getParentId())
+               .elem("RootId", s.getRootId());
             xml.end("member");
         }
         xml.end("StackSummaries").end("ListStacksResult")
@@ -704,6 +707,9 @@ public class CloudFormationQueryHandler {
         if (s.getStatusReason() != null) {
             xml.elem("StackStatusReason", s.getStatusReason());
         }
+        // A nested stack's parent and root; a root stack has neither, so neither element is written.
+        xml.elem("ParentId", s.getParentId())
+           .elem("RootId", s.getRootId());
         xml.start("Capabilities");
         for (String cap : s.getCapabilities()) {
             xml.elem("member", cap);

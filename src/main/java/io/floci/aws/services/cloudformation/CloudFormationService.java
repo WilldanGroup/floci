@@ -4714,6 +4714,8 @@ public class CloudFormationService implements ResourceProvider {
         if (childCreate) {
             childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setParentId(parentStack.getStackId());
+            // The top-level stack: the parent's own root where the parent is nested, the parent where it is one.
+            childStack.setRootId(parentStack.getRootId() != null ? parentStack.getRootId() : parentStack.getStackId());
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
         } else {
