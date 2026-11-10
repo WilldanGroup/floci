@@ -89,7 +89,7 @@ type_order:
   AWS::Lambda: [Function, LayerVersion, EventSourceMapping, Version, Alias, Permission]
   AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
-  AWS::KMS: [Key, Alias]
+  AWS::KMS: [Key, ReplicaKey, Alias]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
   AWS::ECS: [Cluster, TaskDefinition, Service]
   AWS::EKS: [Cluster, Nodegroup]
@@ -186,6 +186,8 @@ service_labels:
 notes:
   AWS::S3::BucketPolicy: document stored on the bucket; S3 does not evaluate it
   AWS::SQS::QueuePolicy: accepted; policy not enforced
+  AWS::KMS::Key: '`KeyPolicy` and `MultiRegion` are applied; a stack delete leaves the key'
+  AWS::KMS::ReplicaKey: 'replicated from the primary `PrimaryKeyArn` names into the stack''s region; a stack delete leaves the replica'
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into

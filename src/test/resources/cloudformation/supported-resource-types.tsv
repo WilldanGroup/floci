@@ -133,6 +133,7 @@ AWS::IoT::Thing	IotCfnProvisioner
 AWS::IoT::TopicRule	IotCfnProvisioner
 AWS::KMS::Alias	KmsCfnProvisioner
 AWS::KMS::Key	KmsCfnProvisioner
+AWS::KMS::ReplicaKey	KmsCfnProvisioner
 AWS::Kinesis::Stream	KinesisCfnProvisioner
 AWS::KinesisFirehose::DeliveryStream	FirehoseCfnProvisioner
 AWS::Lambda::Alias	LambdaVersionAliasCfnProvisioner

@@ -198,7 +198,7 @@ cross-resource references.
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
-| KMS | `Key`, `Alias` |
+| KMS | `Key` (`KeyPolicy` and `MultiRegion` are applied; a stack delete leaves the key), `ReplicaKey` (replicated from the primary `PrimaryKeyArn` names into the stack's region; a stack delete leaves the replica), `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |

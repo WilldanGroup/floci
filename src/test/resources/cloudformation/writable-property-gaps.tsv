@@ -365,11 +365,10 @@ AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
 AWS::KMS::Key	EnableKeyRotation	accepted and ignored
 AWS::KMS::Key	Enabled	accepted and ignored
-AWS::KMS::Key	KeyPolicy	accepted and ignored
-AWS::KMS::Key	MultiRegion	accepted and ignored
 AWS::KMS::Key	Origin	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored
 AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
+AWS::KMS::ReplicaKey	PendingWindowInDays	a stack delete leaves a replica key standing, as it leaves an AWS::KMS::Key, so no deletion is scheduled with this window
 AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored
 AWS::Kinesis::Stream	MaxRecordSizeInKiB	accepted and ignored
 AWS::Kinesis::Stream	RecordDistributionStrategy	accepted and ignored
