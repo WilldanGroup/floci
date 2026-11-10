@@ -311,7 +311,8 @@ public class CodeBuildRunner implements ContainerTeardown {
         CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(
                 buildVariables(region, build, project, buildspec, logStream, credentials.env()),
                 network.filter(ContainerSpec::acceptsLinkLocalIps),
-                credentials.servedAtEndpoint() ? credentialsRelay() : null,
+                credentials.servedAtEndpoint()
+                        ? credentialsRelay(credentials.env().get(CodeBuildRoleCredentials.RELATIVE_URI)) : null,
                 resolvers.dnsServers() == null ? List.of() : resolvers.dnsServers(),
                 resolvers.extraHosts() == null ? List.of() : resolvers.extraHosts(),
                 agentLabels(buildId, region), buildspecFile);
@@ -337,6 +338,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             Optional<String> logLine = CodeBuildAgent.buildLogLine(line);
             if (logLine.isEmpty()) {
                 LOG.debugv("[codebuild:{0}] {1}", buildId, line);
+                phases.composeLine(line);
                 return;
             }
             LOG.infov("[codebuild:{0}] {1}", buildId, logLine.get());
@@ -518,12 +520,12 @@ public class CodeBuildRunner implements ContainerTeardown {
      * The relay that serves the build's container its session at the credentials endpoint, of the helper
      * image ECS's credentials proxy runs, forwarding to the credentials server at Floci's address.
      */
-    private CodeBuildAgent.CredentialsRelay credentialsRelay() {
+    private CodeBuildAgent.CredentialsRelay credentialsRelay(String path) {
         String image = config.services().ecs().taskRoleCredentials().proxyImage();
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder, image, HELPER_IMAGE, HELPER_DOCKERFILE);
         String resolved = containerBuilder.resolveImage(image);
         return new CodeBuildAgent.CredentialsRelay(resolved != null ? resolved : image, dockerHostResolver.resolve(),
-                config.services().ecs().taskRoleCredentials().port());
+                config.services().ecs().taskRoleCredentials().port(), path);
     }
 
     /** Starts the agent's container; returns its id. */
@@ -870,6 +872,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         private String lastCompleted;
         private boolean sawPhase;
         private String lastLine;
+        private String lastComposeLine;
 
         AgentPhases(Build build) {
             this.build = build;
@@ -911,9 +914,19 @@ public class CodeBuildRunner implements ContainerTeardown {
             return sawPhase;
         }
 
-        /** The build log's last line, which says why an agent that ran no phase ended. */
+        /** A line of docker-compose's own, which says why the agent's service never ran, where it did not. */
+        synchronized void composeLine(String line) {
+            if (!line.isBlank()) {
+                lastComposeLine = line.strip();
+            }
+        }
+
+        /**
+         * The build log's last line, which says why an agent that ran no phase ended, or docker-compose's
+         * last where the agent's service wrote none.
+         */
         synchronized Optional<String> lastLine() {
-            return Optional.ofNullable(lastLine);
+            return Optional.ofNullable(lastLine != null ? lastLine : lastComposeLine);
         }
 
         synchronized boolean failed() {

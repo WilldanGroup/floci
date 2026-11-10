@@ -6,6 +6,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -137,18 +138,37 @@ class CodeBuildAgentTest {
     void theBuildsContainerReadsItsSessionAtTheCredentialsAddressThroughARelayInItsOwnNetworkNamespace()
             throws Exception {
         CodeBuildAgent.Plan plan = new CodeBuildAgent.Plan(Map.of(), Optional.of("floci-net"),
-                new CodeBuildAgent.CredentialsRelay("floci/network-helper:local", "172.30.0.2", 51679), List.of(),
-                List.of(), Map.of("floci", "true"), Path.of("/tmp/w/b-1/buildspec.yml"));
+                new CodeBuildAgent.CredentialsRelay("floci/network-helper:local", "172.30.0.2", 51679,
+                        "/v2/credentials/abc"), List.of(), List.of(), Map.of("floci", "true"),
+                Path.of("/tmp/w/b-1/buildspec.yml"));
 
-        JsonNode relay = YAML.readTree(CodeBuildAgent.composeOverride(plan)).path("services").path("credentials");
+        String text = CodeBuildAgent.composeOverride(plan);
+        JsonNode services = YAML.readTree(text).path("services");
+        JsonNode relay = services.path("credentials");
 
         assertEquals("floci/network-helper:local", relay.path("image").asText());
         assertEquals("service:build", relay.path("network_mode").asText());
         assertEquals("NET_ADMIN", relay.path("cap_add").get(0).asText());
         assertEquals("ip address add 169.254.170.2/32 dev lo && exec socat TCP-LISTEN:80,bind=169.254.170.2,"
                 + "fork,reuseaddr TCP:172.30.0.2:51679", relay.path("command").get(0).asText());
-        assertTrue(YAML.readTree(CodeBuildAgent.composeOverride(plan(Map.of(), Optional.of("floci-net"))))
-                .path("services").path("credentials").isMissingNode());
+        assertEquals(List.of("CMD", "curl", "-fsS", "-o", "/dev/null", "http://169.254.170.2/v2/credentials/abc"),
+                texts(relay.path("healthcheck").path("test")));
+        assertEquals("service_healthy", services.path("agent").path("depends_on").path("credentials")
+                .path("condition").asText());
+        assertEquals(List.of("BMR"), texts(services.path("agent").path("networks").path("default").path("aliases")));
+        assertTrue(text.contains("\n    links: !reset []\n"), text);
+
+        String unrelayed = CodeBuildAgent.composeOverride(plan(Map.of(), Optional.of("floci-net")));
+        JsonNode plain = YAML.readTree(unrelayed).path("services");
+        assertTrue(plain.path("credentials").isMissingNode(), unrelayed);
+        assertTrue(plain.path("agent").path("depends_on").isMissingNode(), unrelayed);
+        assertFalse(unrelayed.contains("links"), unrelayed);
+    }
+
+    private static List<String> texts(JsonNode array) {
+        List<String> texts = new ArrayList<>();
+        array.forEach(node -> texts.add(node.asText()));
+        return texts;
     }
 
     private static CodeBuildAgent.Plan plan(Map<String, String> variables, Optional<String> network) {
