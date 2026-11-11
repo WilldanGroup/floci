@@ -2686,7 +2686,7 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
                         resolveStackOutput(accountId, name, output, outputRegion, roleArn),
                 parameterTypes(template),
                 (id, attribute, value) -> dispatcher.attributeValue(
-                        resources.path(id).path("Type").asText(), attribute, value));
+                        resources.path(id).path("Type").asText(), attribute, value)).planning();
     }
 
     /** Removes from their stacks the nested change sets {@code changeSet} planned, and those below them. */

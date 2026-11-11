@@ -84,6 +84,11 @@ public class CloudFormationTemplateEngine {
      * including nested intrinsic calls.
      */
     private int dynamicReferencesSuspended;
+    /**
+     * Whether this engine resolves a change set's plan rather than an operation: a plan reads no
+     * {@code Fn::GetStackOutput} whose arguments name a resource that does not stand yet.
+     */
+    private boolean planning;
 
     /**
      * A minimal engine for a resource provisioned outside any stack (Cloud Control CreateResource).
@@ -1022,6 +1027,15 @@ public class CloudFormationTemplateEngine {
         throw new AwsException("ValidationError", "No export named " + exportName + " found", 400);
     }
 
+    /**
+     * Marks this engine as resolving a change set's plan, which leaves unresolved a
+     * {@code Fn::GetStackOutput} naming a resource that does not stand yet.
+     */
+    CloudFormationTemplateEngine planning() {
+        this.planning = true;
+        return this;
+    }
+
     /** Whether {@code node} holds {@code Fn::GetStackOutput} anywhere inside it. */
     static boolean containsGetStackOutput(JsonNode node) {
         return node != null && !node.findValues(GET_STACK_OUTPUT).isEmpty();
@@ -1046,10 +1060,19 @@ public class CloudFormationTemplateEngine {
             throw new AwsException("ValidationError",
                     "TemplateError: Fn::GetStackOutput requires a map of named parameters", 400);
         }
+        int unresolvedBefore = unresolvedIntrinsics.size();
         String referencedStack = getStackOutputParameter(args, "StackName");
         String outputName = getStackOutputParameter(args, "OutputName");
         String referencedRegion = getStackOutputParameter(args, "Region");
         String roleArn = getStackOutputParameter(args, "RoleArn");
+        if (planning && unresolvedIntrinsics.size() > unresolvedBefore) {
+            // A plan reads the output only of a stack that stands: one a resource the same change set
+            // adds will stand is read when the execution creates or updates this resource, so the plan
+            // leaves the value unresolved, as it leaves a Ref or Fn::GetAtt of that resource.
+            LOG.debugv("Unresolved Fn::GetStackOutput: {0}.{1}", referencedStack, outputName);
+            unresolvedIntrinsics.add("Fn::GetStackOutput " + referencedStack + "." + outputName);
+            return referencedStack + "." + outputName;
+        }
         if (referencedStack.isEmpty()) {
             throw new AwsException("ValidationError", "GetStackOutput: StackName is required", 400);
         }
