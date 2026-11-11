@@ -167,6 +167,53 @@ class CloudFormationNestedChangeSetIntegrationTest {
         cfn("DescribeStacks", "StackName", plannedOn).statusCode(400).body(containsString("does not exist"));
     }
 
+    /**
+     * A nested stack the update adds whose parameter reads, by {@code Fn::GetStackOutput}, an output of a stack another
+     * resource the same update adds will stand: CloudFormation plans it with that value unresolved, since nothing stands
+     * to read yet (CloudFormation User Guide, "Change sets for nested stacks": every nested stack the change set adds is
+     * planned; dev's plan of a first stand, every nested stack an Add naming its own change set while its siblings'
+     * outputs it takes did not stand), and reads the output when the execution creates the nested stack.
+     */
+    @Test
+    void aNestedStackReadingAnOutputOfAStackTheSameUpdateAddsIsPlannedAndHandedItOnExecution() {
+        putTemplate("producer.json", "{\"Resources\":{\"One\":" + QUEUE + "},"
+                + "\"Outputs\":{\"Out\":{\"Value\":\"from-the-producer\"}}}");
+        putTemplate("consumer.json", "{\"Parameters\":{\"Given\":{\"Type\":\"String\"}},"
+                + "\"Resources\":{\"One\":" + QUEUE + "},\"Outputs\":{\"Seen\":{\"Value\":{\"Ref\":\"Given\"}}}}");
+        String placeholder = "nested-cs-reads-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", "StackName", placeholder, "TemplateBody",
+                "{\"Resources\":{\"Placeholder\":{\"Type\":\"AWS::SQS::Queue\"}}}").statusCode(200);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(placeholder).status());
+        String template = """
+                {"Resources":{
+                  "Producer":{"Type":"AWS::CloudFormation::Stack",
+                    "Properties":{"TemplateURL":"http://localhost/%1$s/producer.json"}},
+                  "Consumer":{"Type":"AWS::CloudFormation::Stack",
+                    "Properties":{"TemplateURL":"http://localhost/%1$s/consumer.json",
+                      "Parameters":{"Given":{"Fn::GetStackOutput":
+                        {"StackName":{"Ref":"Producer"},"OutputName":"Out"}}}}}}}""".formatted(bucket);
+
+        cfn("CreateChangeSet", "StackName", placeholder, "ChangeSetName", "first",
+                "TemplateBody", template, "IncludeNestedStacks", "true").statusCode(200);
+        awaitCreated(placeholder, "first");
+
+        XmlPath rootRead = describe("StackName", placeholder, "ChangeSetName", "first");
+        assertEquals("CREATE_COMPLETE", rootRead.getString(path("Status")), rootRead.getString(path("StatusReason")));
+        String nested = rootRead.getString(path("Changes.member.find { it.ResourceChange.LogicalResourceId == "
+                + "'Consumer' }.ResourceChange.ChangeSetId"));
+        assertTrue(nested.contains(":changeSet/"), nested);
+        assertEquals("CREATE_COMPLETE", describe("ChangeSetName", nested).getString(path("Status")));
+
+        cfn("ExecuteChangeSet", "StackName", placeholder, "ChangeSetName", "first").statusCode(200);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(placeholder).status());
+        String consumer = cfn("DescribeStackResource", "StackName", placeholder, "LogicalResourceId", "Consumer")
+                .statusCode(200).extract().xmlPath().getString("DescribeStackResourceResponse"
+                        + ".DescribeStackResourceResult.StackResourceDetail.PhysicalResourceId");
+        assertEquals("from-the-producer", cfn("DescribeStacks", "StackName", consumer).statusCode(200)
+                .extract().xmlPath().getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member"
+                        + ".Outputs.member.find { it.OutputKey == 'Seen' }.OutputValue"));
+    }
+
     /** A root change set moving the child to its second template: its ARN, once created. */
     private String createRoot(String name) {
         String id = cfn("CreateChangeSet", "StackName", parent, "ChangeSetName", name,
