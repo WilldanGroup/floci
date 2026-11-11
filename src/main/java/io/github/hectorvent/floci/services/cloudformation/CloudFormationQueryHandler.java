@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -910,6 +911,11 @@ public class CloudFormationQueryHandler {
                     .end("ManagedExecution");
             appendCapabilities(xml, ss.getCapabilities());
             appendParameters(xml, ss.getParameters());
+            // The StackSet data type carries the set's tags (CloudFormation API Reference, StackSet).
+            xml.start("Tags");
+            new LinkedHashMap<>(ss.getTags()).forEach((k, v) ->
+                    xml.start("member").elem("Key", k).elem("Value", v).end("member"));
+            xml.end("Tags");
             xml.end("StackSet").end("DescribeStackSetResult")
                .raw(AwsQueryResponse.responseMetadata())
                .end("DescribeStackSetResponse");

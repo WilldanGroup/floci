@@ -145,6 +145,58 @@ class CloudFormationStackSetsIntegrationTest {
         assertQueueAbsent("000000000000", queue);
     }
 
+    /**
+     * DescribeStackSet answers the stack set's tags, as its {@code StackSet} carries them (CloudFormation API
+     * Reference, DescribeStackSet and the StackSet data type, {@code Tags}): those CreateStackSet was given, and those
+     * an UpdateStackSet that names tags replaces them with.
+     */
+    @Test
+    void describeStackSetAnswersTheTagsTheStackSetCarries() {
+        String name = "set-tags-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", name)
+            .formParam("TemplateBody", queueTemplate(name))
+            .formParam("Tags.member.1.Key", "swb:stack-set")
+            .formParam("Tags.member.1.Value", name)
+            .formParam("Tags.member.2.Key", "team")
+            .formParam("Tags.member.2.Value", "one")
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSet")
+            .formParam("StackSetName", name)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<member><Key>swb:stack-set</Key><Value>" + name + "</Value></member>"))
+            .body(containsString("<member><Key>team</Key><Value>one</Value></member>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", name)
+            .formParam("TemplateBody", queueTemplate(name))
+            .formParam("Tags.member.1.Key", "team")
+            .formParam("Tags.member.1.Value", "two")
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSet")
+            .formParam("StackSetName", name)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Tags><member><Key>team</Key><Value>two</Value></member></Tags>"));
+    }
+
     @Test
     void createStackSetWithoutTemplateIsRejected() {
         // AWS rejects CreateStackSet when neither TemplateBody nor TemplateURL is supplied; otherwise
