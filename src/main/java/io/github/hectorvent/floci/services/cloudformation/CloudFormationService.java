@@ -4620,7 +4620,14 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
         addEvent(childStack, childStack.getStackName(), childStack.getStackId(),
                 "AWS::CloudFormation::Stack", childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
 
-        executeTemplate(childStack, childTemplate, childParams, null, childCreate, region, accountId);
+        // The parent's stack-level tags reach the stacks it creates, as they reach every resource it
+        // creates, and the nested stack's own Tags are added to them; an update of the child replaces
+        // them as it commits, as an update replaces a root's.
+        Map<String, String> childTags = nestedStackTags(parentStack, props, engine);
+        if (childCreate) {
+            childStack.replaceTags(childTags);
+        }
+        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
@@ -4645,6 +4652,28 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
         }
 
         return resource;
+    }
+
+    /**
+     * The tags a nested stack carries: its parent's stack-level tags, which CloudFormation propagates to the
+     * resources a stack creates (CloudFormation API Reference, CreateStack, Tags: "CloudFormation also propagates
+     * these tags to the resources created in the stack"), with the {@code AWS::CloudFormation::Stack} resource's own
+     * {@code Tags} added over them (CloudFormation Template Reference, AWS::CloudFormation::Stack, Tags).
+     */
+    private static Map<String, String> nestedStackTags(Stack parentStack, JsonNode props,
+                                                       CloudFormationTemplateEngine engine) {
+        Map<String, String> tags = new LinkedHashMap<>(parentStack.tagsSnapshot());
+        JsonNode own = props != null ? props.path("Tags") : null;
+        if (own != null && own.isArray()) {
+            for (JsonNode tag : own) {
+                String key = engine.resolve(tag.path("Key"));
+                if (key != null && !key.isBlank()) {
+                    String value = engine.resolve(tag.path("Value"));
+                    tags.put(key, value != null ? value : "");
+                }
+            }
+        }
+        return tags;
     }
 
     /** Prefixes the keys {@link #recordTemplateUses} keeps, one per resource a definition names. */
