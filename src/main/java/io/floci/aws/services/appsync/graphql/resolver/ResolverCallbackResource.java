@@ -1,9 +1,12 @@
 package io.floci.aws.services.appsync.graphql.resolver;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.services.appsync.graphql.SchemaRegistry;
+import io.floci.aws.services.appsync.graphql.SdlFieldTypes;
 import io.floci.aws.services.appsync.model.Resolver;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -44,14 +47,17 @@ public class ResolverCallbackResource {
 
     private final ResolverCallbackSessions sessions;
     private final AppSyncResolverExecutor executor;
+    private final SchemaRegistry schemaRegistry;
     private final ObjectMapper objectMapper;
 
     @Inject
     public ResolverCallbackResource(ResolverCallbackSessions sessions,
                                     AppSyncResolverExecutor executor,
+                                    SchemaRegistry schemaRegistry,
                                     ObjectMapper objectMapper) {
         this.sessions = sessions;
         this.executor = executor;
+        this.schemaRegistry = schemaRegistry;
         this.objectMapper = objectMapper;
     }
 
@@ -108,21 +114,114 @@ public class ResolverCallbackResource {
         }
         ResolverOutcome outcome = executor.execute(resolver, invocation);
         session.appendErrors(outcome.appendedErrors());
-        return outcome.failed() ? error(id, outcome.error()) : success(id, outcome.data());
+        return outcome.failed() ? error(id, outcome.error()) : success(id, asServed(invocation, outcome.data()));
+    }
+
+    /**
+     * The resolver's answer as AppSync serves it. AppSync serializes a resolver's answer to an AWSJSON field
+     * once more on the way out: a map is served as the JSON text of the map, and JSON text answered as a string
+     * is served as a string encoding that text, one beginning {@code "{}, which a reader parses twice. The
+     * sidecar's json-string coercion serializes a map or a list to text the same way but passes a string
+     * through as it stands, so a string answered to an AWSJSON field, or each string in a list answered to a
+     * list of AWSJSON, is encoded here before the sidecar sees it. Every other value, and a field of any
+     * other type, is left to the sidecar.
+     */
+    private Object asServed(ResolverInvocation invocation, Object data) {
+        if (!(data instanceof String) && !(data instanceof List<?>)) {
+            return data;
+        }
+        Optional<SdlFieldTypes.FieldType> declared = schemaRegistry.getSdl(invocation.apiId())
+                .flatMap(sdl -> SdlFieldTypes.declaredType(sdl, invocation.typeName(), invocation.fieldName()));
+        if (declared.isEmpty() || !"AWSJSON".equals(declared.get().name())) {
+            return data;
+        }
+        if (data instanceof String text && !declared.get().list()) {
+            return encoded(text);
+        }
+        if (data instanceof List<?> list && declared.get().list()) {
+            List<Object> served = new ArrayList<>(list.size());
+            for (Object element : list) {
+                served.add(element instanceof String text ? encoded(text) : element);
+            }
+            return served;
+        }
+        return data;
+    }
+
+    /** The JSON encoding of a string, quotes included, as AppSync serializes a string answered to AWSJSON. */
+    private String encoded(String text) {
+        try {
+            return objectMapper.writeValueAsString(text);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("A string could not be encoded as JSON", e);
+        }
     }
 
     private ResolverInvocation invocationFrom(ResolverCallbackSessions.Session session, JsonNode node) {
+        String typeName = node.path("typeName").asText();
+        String fieldName = node.path("fieldName").asText();
         return new ResolverInvocation(
                 session.apiId(),
-                node.path("typeName").asText(),
-                node.path("fieldName").asText(),
-                asMap(node.get("arguments")),
+                typeName,
+                fieldName,
+                asAppSyncHandsThem(session.apiId(), typeName, fieldName, asMap(node.get("arguments"))),
                 asPlain(node.get("source")),
                 asList(node.get("path")),
                 asMap(node.get("variables")),
                 asStrings(node.get("selectionSetList")),
                 session.identity(),
                 session.authType());
+    }
+
+    /**
+     * The arguments as AppSync hands them to a resolver: an AWSJSON argument is JSON text on the wire, which
+     * the sidecar's json-string coercion keeps as text, while AppSync parses it into maps and lists before the
+     * resolver reads {@code ctx.args}. So each argument declared AWSJSON, each element of a list of them, and
+     * each such field of an input object argument, is parsed here; text that is not JSON is left as it came.
+     */
+    private Map<String, Object> asAppSyncHandsThem(String apiId, String typeName, String fieldName,
+                                                   Map<String, Object> arguments) {
+        Optional<String> sdl = schemaRegistry.getSdl(apiId);
+        if (sdl.isEmpty() || arguments.isEmpty()) {
+            return arguments;
+        }
+        Map<String, Object> handed = new LinkedHashMap<>();
+        arguments.forEach((name, value) -> handed.put(name,
+                parsed(sdl.get(), SdlFieldTypes.argumentType(sdl.get(), typeName, fieldName, name).orElse(null), value)));
+        return handed;
+    }
+
+    private Object parsed(String sdl, SdlFieldTypes.FieldType declared, Object value) {
+        if (declared == null || value == null) {
+            return value;
+        }
+        if (declared.list()) {
+            if (!(value instanceof List<?> list)) {
+                return value;
+            }
+            SdlFieldTypes.FieldType element = new SdlFieldTypes.FieldType(declared.name(), false);
+            List<Object> elements = new ArrayList<>(list.size());
+            list.forEach(item -> elements.add(parsed(sdl, element, item)));
+            return elements;
+        }
+        if ("AWSJSON".equals(declared.name())) {
+            if (!(value instanceof String text)) {
+                return value;
+            }
+            try {
+                return objectMapper.readValue(text, Object.class);
+            } catch (JsonProcessingException e) {
+                return value;
+            }
+        }
+        if (value instanceof Map<?, ?> fields && SdlFieldTypes.isInputType(sdl, declared.name())) {
+            Map<String, Object> input = new LinkedHashMap<>();
+            fields.forEach((key, field) -> input.put(String.valueOf(key),
+                    parsed(sdl, SdlFieldTypes.declaredType(sdl, declared.name(), String.valueOf(key)).orElse(null),
+                            field)));
+            return input;
+        }
+        return value;
     }
 
     /** What graphql-java's own property fetcher would have read off the parent value. */

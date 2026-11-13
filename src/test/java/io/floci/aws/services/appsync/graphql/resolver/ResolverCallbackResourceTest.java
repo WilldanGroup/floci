@@ -2,6 +2,7 @@ package io.floci.aws.services.appsync.graphql.resolver;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.appsync.graphql.SchemaRegistry;
 import io.floci.aws.services.appsync.model.Resolver;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,12 +33,13 @@ class ResolverCallbackResourceTest {
 
     private final AppSyncResolverExecutor executor = mock(AppSyncResolverExecutor.class);
     private final ResolverCallbackSessions sessions = new ResolverCallbackSessions();
+    private final SchemaRegistry schemas = new SchemaRegistry();
     private ResolverCallbackResource resource;
     private ResolverCallbackSessions.Session session;
 
     @BeforeEach
     void setUp() {
-        resource = new ResolverCallbackResource(sessions, executor, new ObjectMapper());
+        resource = new ResolverCallbackResource(sessions, executor, schemas, new ObjectMapper());
         session = sessions.open(API_ID, Map.of("sub", "u-1"), "AWS_IAM", "000000000000", "us-east-1");
     }
 
@@ -169,6 +171,61 @@ class ResolverCallbackResourceTest {
         assertEquals(List.of("partial"), results.get(0).get("data"));
         assertNull(results.get(0).get("error"));
         assertEquals(List.of(appended), session.appendedErrors());
+    }
+
+    /**
+     * AppSync serializes a resolver's answer to an AWSJSON field once more on the way out, so JSON text answered
+     * as a string is served as a string encoding it. The sidecar passes a string through as it stands, so the
+     * callback encodes it; a map is left to the sidecar, which serializes it to text as AppSync does, and a
+     * string answered to a field of any other type is served as it is.
+     */
+    @Test
+    void aStringAnsweredToAnAwsJsonFieldIsEncodedOnceMoreAndAMapLeftToTheSidecar() {
+        schemas.register(API_ID, "type Query { settings: AWSJSON, tags: [AWSJSON!], name: String }");
+        Resolver resolver = aResolver();
+        when(executor.findResolver(eq(API_ID), any(), any())).thenReturn(resolver);
+        when(executor.execute(eq(resolver), any()))
+                .thenReturn(new ResolverOutcome("{\"a\":1}", null, List.of()))
+                .thenReturn(new ResolverOutcome(Map.of("a", 1), null, List.of()))
+                .thenReturn(new ResolverOutcome(List.of("{\"b\":2}", Map.of("c", 3)), null, List.of()))
+                .thenReturn(new ResolverOutcome("{\"a\":1}", null, List.of()));
+
+        List<Map<String, Object>> results = results(resource.resolve("Bearer " + session.token(),
+                body(invocation("0", "Query", "settings"), invocation("1", "Query", "settings"),
+                        invocation("2", "Query", "tags"), invocation("3", "Query", "name"))));
+
+        assertEquals("\"{\\\"a\\\":1}\"", results.get(0).get("data"));
+        assertEquals(Map.of("a", 1), results.get(1).get("data"));
+        assertEquals(List.of("\"{\\\"b\\\":2}\"", Map.of("c", 3)), results.get(2).get("data"));
+        assertEquals("{\"a\":1}", results.get(3).get("data"));
+    }
+
+    /**
+     * AppSync parses an AWSJSON argument into maps and lists before the resolver sees it, while the sidecar
+     * hands the callback the JSON text the caller sent, so the callback parses it: a top-level argument, each
+     * element of a list of them, and such a field of an input object; an argument of another type stays as sent.
+     */
+    @Test
+    void anAwsJsonArgumentReachesTheResolverParsedAsAppSyncHandsIt() {
+        schemas.register(API_ID, "input Handshake { manifest: AWSJSON, name: String } type Mutation { "
+                + "publish(image: AWSJSON, handshake: Handshake, images: [AWSJSON], note: String): Boolean }");
+        Resolver resolver = aResolver();
+        when(executor.findResolver(eq(API_ID), any(), any())).thenReturn(resolver);
+        when(executor.execute(eq(resolver), any())).thenReturn(new ResolverOutcome(true, null, List.of()));
+
+        String invocation = "{\"id\":\"0\",\"typeName\":\"Mutation\",\"fieldName\":\"publish\",\"arguments\":{"
+                + "\"image\":\"{\\\"tag\\\":\\\"v1\\\"}\",\"handshake\":{\"manifest\":\"[1,2]\",\"name\":\"{}\"},"
+                + "\"images\":[\"{\\\"a\\\":1}\",\"2\"],\"note\":\"{\\\"kept\\\":true}\"},"
+                + "\"source\":null,\"path\":[\"publish\"],\"variables\":{},\"selectionSetList\":[]}";
+        results(resource.resolve("Bearer " + session.token(), body(invocation)));
+
+        ArgumentCaptor<ResolverInvocation> captor = ArgumentCaptor.forClass(ResolverInvocation.class);
+        verify(executor).execute(eq(resolver), captor.capture());
+        Map<String, Object> arguments = captor.getValue().arguments();
+        assertEquals(Map.of("tag", "v1"), arguments.get("image"));
+        assertEquals(Map.of("manifest", List.of(1, 2), "name", "{}"), arguments.get("handshake"));
+        assertEquals(List.of(Map.of("a", 1), 2), arguments.get("images"));
+        assertEquals("{\"kept\":true}", arguments.get("note"));
     }
 
     @Test
