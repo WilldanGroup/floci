@@ -52,6 +52,8 @@ class CodeBuildAgentTest {
                 override.path("services").path("build").path("volumes").get(0).asText());
         assertEquals("true", override.path("services").path("agent").path("labels").path("floci").asText());
         assertEquals("true", override.path("volumes").path("user_volume").path("labels").path("floci").asText());
+        assertEquals("true", override.path("volumes").path(CodeBuildAgent.ARTIFACTS_VOLUME).path("labels")
+                .path("floci").asText(), override::toString);
     }
 
     @Test

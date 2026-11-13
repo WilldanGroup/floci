@@ -26,7 +26,9 @@ import org.junit.jupiter.api.Timeout;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -199,6 +201,54 @@ class CodeBuildAgentDockerIntegrationTest {
             try (Stream<Path> left = Files.list(Profile.WORKSPACE)) {
                 assertEquals(List.of(), left.toList());
             }
+        }
+    }
+
+    /**
+     * The build's container runs as root, so a host folder it may write is one where a file the Docker
+     * host's user cannot remove appears whenever a build is stopped before Floci removes its working
+     * folder. Every host path a container of the build binds is read-only but the Docker socket, which
+     * holds no file; what the build writes, its artifacts among them, is in the compose project's volumes.
+     */
+    @Test
+    void noContainerABuildStartsBindsAHostPathItMayWriteButTheDockerSocket() throws Exception {
+        given().put("/" + resultsBucket).then().statusCode(200);
+        createProject(hostEnvironmentType(), """
+                version: 0.2
+                phases:
+                  build:
+                    commands:
+                      - echo collected > collected.txt
+                artifacts:
+                  files:
+                    - collected.txt
+                """, Map.of("type", "S3", "location", resultsBucket, "packaging", "NONE"));
+
+        Map<String, Container> seen = new HashMap<>();
+        JsonPath build = awaitBuild(startBuild(), seen);
+
+        assertEquals("SUCCEEDED", build.getString("buildStatus"), () -> "phases: " + build.getList("phases"));
+        assertEquals("collected", result("collected.txt"));
+        assertFalse(seen.isEmpty(), "no container of the build's agent was seen while it ran");
+        List<String> writable = seen.values().stream()
+                .flatMap(container -> Optional.ofNullable(container.getMounts()).orElse(List.of()).stream()
+                        .filter(mount -> mount.getName() == null || mount.getName().isEmpty())
+                        .filter(mount -> Boolean.TRUE.equals(mount.getRw()))
+                        .filter(mount -> !isSocket(mount.getSource()))
+                        .map(mount -> role(container) + " binds " + mount.getSource() + " at "
+                                + mount.getDestination() + " writable"))
+                .sorted()
+                .toList();
+        assertEquals(List.of(), writable);
+    }
+
+    /** Whether {@code path} is a socket on this host, which holds no file: the Docker socket. */
+    private static boolean isSocket(String path) {
+        try {
+            return Files.readAttributes(Path.of(path), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
+                    .isOther();
+        } catch (IOException | RuntimeException e) {
+            return false;
         }
     }
 
