@@ -54,6 +54,21 @@ final class CodeBuildAgent {
      */
     static final String BUILDSPEC_PATH = "/codebuild/floci/buildspec.yml";
 
+    /**
+     * What Floci hands the agent as {@code ARTIFACTS}: a volume of the build's compose project, which Floci's
+     * compose file declares, never a folder of the Docker host. The agent's file mounts {@code ARTIFACTS} at
+     * {@code /codebuild/output/artifacts} in the build's container, which runs as root, so a host folder there
+     * is one the build may write files into that the host's user cannot remove; in a volume, what it writes
+     * goes with the project.
+     */
+    static final String ARTIFACTS_VOLUME = "artifacts_volume";
+
+    /** The archive of the buildspec's {@code artifacts} the executor writes, in the build's container. */
+    static final String ARTIFACTS_ARCHIVE = "/codebuild/output/artifacts/artifacts.zip";
+
+    /** The agent's compose service the buildspec runs in. */
+    static final String BUILD_SERVICE = "build";
+
     /** The prefix the agent's own environment file gives each variable it hands the build. */
     static final String VARIABLE_PREFIX = "CUSTOMER_";
 
@@ -236,7 +251,7 @@ final class CodeBuildAgent {
 
         Map<String, Object> services = new LinkedHashMap<>();
         services.put("agent", agent);
-        services.put("build", build);
+        services.put(BUILD_SERVICE, build);
         if (plan.relay() != null) {
             Map<String, Object> relay = new LinkedHashMap<>();
             relay.put("image", literal(plan.relay().image()));
@@ -260,6 +275,7 @@ final class CodeBuildAgent {
         Map<String, Object> volumes = new LinkedHashMap<>();
         volumes.put("source_volume", volumeLabels);
         volumes.put("user_volume", volumeLabels);
+        volumes.put(ARTIFACTS_VOLUME, volumeLabels);
 
         Map<String, Object> override = new LinkedHashMap<>();
         override.put("services", services);

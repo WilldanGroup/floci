@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codebuild;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.WaitContainerResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Network;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -30,11 +31,14 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -69,6 +73,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private static final String DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
     private static final String UNIX_SCHEME = "unix://";
     private static final String COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+    private static final String COMPOSE_SERVICE_LABEL = "com.docker.compose.service";
     private static final int STOP_TIMEOUT_SECONDS = 5;
     private static final String HELPER_IMAGE = "floci/network-helper:local";
     private static final String HELPER_DOCKERFILE = "/docker/network-helper.Dockerfile";
@@ -271,7 +276,6 @@ public class CodeBuildRunner implements ContainerTeardown {
         Path buildFolder = owner.give(Files.createTempDirectory(owner.folder(), folderPrefix(buildId)));
         resources.buildFolder = buildFolder;
         Path source = owner.give(Files.createDirectory(buildFolder.resolve("src")));
-        Path artifacts = owner.give(Files.createDirectory(buildFolder.resolve("artifacts")));
 
         String buildspecContent;
         ParsedBuildspec buildspec;
@@ -340,8 +344,8 @@ public class CodeBuildRunner implements ContainerTeardown {
         String composeProject = CodeBuildAgent.composeProject(buildFolder.getFileName().toString());
         resources.composeProject = composeProject;
 
-        ContainerSpec agentSpec = agentSpec(agentImage.get(), image, privileged, build, source, artifacts,
-                wrapper, override, composeProject, region);
+        ContainerSpec agentSpec = agentSpec(agentImage.get(), image, privileged, build, source, wrapper,
+                override, composeProject, region);
         String agentId = startAgent(agentSpec, plan);
         resources.agentId = agentId;
         runningAgents.put(executionId, new RunningAgent(agentId, composeProject));
@@ -388,7 +392,7 @@ public class CodeBuildRunner implements ContainerTeardown {
 
         if (phases.succeeded("UPLOAD_ARTIFACTS")) {
             try {
-                uploadArtifacts(build, project, buildspec.artifacts(), artifacts.resolve("artifacts.zip"));
+                uploadArtifacts(build, project, buildspec.artifacts(), composeProject);
             } catch (Exception e) {
                 LOG.warnv("Artifact upload failed for build {0}: {1}", buildId, e.getMessage());
                 completePhaseWithError(build, "UPLOAD_ARTIFACTS", "FAILED", "CLIENT_ERROR", e.getMessage());
@@ -502,13 +506,13 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     /** The agent's container, handed what {@code codebuild_build.sh} hands it. */
     private ContainerSpec agentSpec(String agentImage, String image, boolean privileged, Build build, Path source,
-                                    Path artifacts, Path wrapper, Path override, String composeProject,
+                                    Path wrapper, Path override, String composeProject,
                                     String region) {
         String resolvedAgentImage = containerBuilder.resolveImage(agentImage);
         ContainerBuilder.Builder builder = containerBuilder.newContainer(agentImage)
                 .withEnv("IMAGE_NAME", image)
                 .withEnv("SOURCE", source.toString())
-                .withEnv("ARTIFACTS", artifacts.toString())
+                .withEnv("ARTIFACTS", CodeBuildAgent.ARTIFACTS_VOLUME)
                 .withEnv("BUILDSPEC", CodeBuildAgent.BUILDSPEC_PATH)
                 .withEnv("INITIATOR", build.getInitiator() != null ? build.getInitiator() : "user")
                 .withEnv("LOCAL_AGENT_IMAGE_NAME", resolvedAgentImage != null ? resolvedAgentImage : agentImage)
@@ -727,16 +731,16 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     /**
      * Uploads what the agent collected, the {@code artifacts.zip} it writes of the buildspec's
-     * {@code artifacts} section, as the project's artifacts say: the archive itself, or each file in it
-     * for {@code NONE} packaging.
+     * {@code artifacts} section, read out of the build's container, as the project's artifacts say: the
+     * archive itself, or each file in it for {@code NONE} packaging.
      */
-    private void uploadArtifacts(Build build, Project project, ParsedArtifacts artifacts, Path archive)
+    private void uploadArtifacts(Build build, Project project, ParsedArtifacts artifacts, String composeProject)
             throws IOException {
         String type = artifacts.type();
         if ("NO_ARTIFACTS".equals(type) && project.getArtifacts() != null) {
             type = project.getArtifacts().getType();
         }
-        if (!"S3".equals(type) || !Files.isRegularFile(archive)) {
+        if (!"S3".equals(type)) {
             return;
         }
 
@@ -757,7 +761,11 @@ public class CodeBuildRunner implements ContainerTeardown {
         String artifactName = artifacts.name() != null ? artifacts.name()
                 : project.getName() + "-" + build.getBuildNumber();
 
-        byte[] zip = Files.readAllBytes(archive);
+        Optional<byte[]> collected = collectedArtifacts(composeProject);
+        if (collected.isEmpty()) {
+            return;
+        }
+        byte[] zip = collected.get();
         if ("NONE".equalsIgnoreCase(packaging)) {
             try (ZipInputStream entries = new ZipInputStream(new ByteArrayInputStream(zip))) {
                 ZipEntry entry;
@@ -773,6 +781,35 @@ public class CodeBuildRunner implements ContainerTeardown {
         } else {
             String key = prefix.isBlank() ? artifactName + ".zip" : prefix + "/" + artifactName + ".zip";
             s3Service.putObject(bucket, key, zip, "application/zip", Map.of());
+        }
+    }
+
+    /**
+     * The {@code artifacts.zip} the agent's executor wrote in the build's container, read through Docker's
+     * archive API from the container the agent leaves stopped, or empty where it wrote none. It is in the
+     * compose project's artifacts volume, never a folder of the Docker host
+     * ({@link CodeBuildAgent#ARTIFACTS_VOLUME}).
+     */
+    private Optional<byte[]> collectedArtifacts(String composeProject) throws IOException {
+        List<Container> builds = dockerClient.listContainersCmd().withShowAll(true)
+                .withLabelFilter(List.of(COMPOSE_PROJECT_LABEL + "=" + composeProject,
+                        COMPOSE_SERVICE_LABEL + "=" + CodeBuildAgent.BUILD_SERVICE))
+                .exec();
+        if (builds.isEmpty()) {
+            return Optional.empty();
+        }
+        try (InputStream archive = dockerClient.copyArchiveFromContainerCmd(builds.get(0).getId(),
+                CodeBuildAgent.ARTIFACTS_ARCHIVE).exec();
+             TarArchiveInputStream tar = new TarArchiveInputStream(archive)) {
+            TarArchiveEntry entry;
+            while ((entry = tar.getNextEntry()) != null) {
+                if (entry.isFile() && tar.canReadEntryData(entry)) {
+                    return Optional.of(tar.readAllBytes());
+                }
+            }
+            return Optional.empty();
+        } catch (NotFoundException e) {
+            return Optional.empty();
         }
     }
 
