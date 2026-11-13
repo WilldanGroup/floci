@@ -21,7 +21,8 @@ import java.util.Optional;
  * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
- * invitations and shares of other accounts they act on); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
+ * invitations and shares of other accounts they act on; Verified Permissions, for the policy store an alias names);
+ * looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
  * for the namespace a request is of, so IAM never depends on that service directly.</p>
  */
 public interface StoredResourceArns {

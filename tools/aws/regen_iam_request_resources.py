@@ -185,7 +185,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "sso", "states", "textract",
-              "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
+              "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty", "verifiedpermissions")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -299,10 +299,6 @@ NOT_COVERED: dict[str, str] = {
            "it; reading it needs that format corrected",
     "transcribe": _LATER,
     "transfer": _LATER,
-    "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
-                           "which AWS authorizes as the action on the store the alias points to and "
-                           "GetPolicyStoreAlias on the alias, and an aliasName carries the `policy-store-alias/` its "
-                           "format already gives; reading it needs both",
     "wafv2": _LATER,
 }
 
@@ -425,6 +421,14 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                 "a request naming no event bus describes the default one ('If you omit this, the "
                                 "default event bus is displayed'); EventBridge V2's request names its bus by "
                                 "EventBusArn alone"),
+    "verifiedpermissions:BatchGetPolicy": ([{"type": "policy-store",
+                                              "fill": {"PolicyStoreId": "requests[].policyStoreId"}}],
+                                            "each request of the batch names its policy by policyStoreId and policyId, "
+                                            "and AWS authorizes the batch as verifiedpermissions:GetPolicy ('The "
+                                            "BatchGetPolicy operation doesn't have its own IAM permission. To "
+                                            "authorize this operation for AWS principals, include the permission "
+                                            "verifiedpermissions:GetPolicy in their IAM policies'), which acts on the "
+                                            "policy store; the rule reads no member of a list's structures"),
     "events:PutEvents": ([{"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
                           {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
                            "absent": {"Entries[].EventBusName": "default"}, "endpoint": "events"}],

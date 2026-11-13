@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-12",
+    "retrieved": "2026-11-13",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -337,6 +337,11 @@
       "GetTaxExemptionTypes": "tax:GetExemptions",
       "ListTaxExemptions": "tax:GetExemptions",
       "PutTaxExemption": "tax:UpdateExemptions"
+    },
+    "verifiedpermissions": {
+      "BatchGetPolicy": "verifiedpermissions:GetPolicy",
+      "BatchIsAuthorized": "verifiedpermissions:IsAuthorized",
+      "BatchIsAuthorizedWithToken": "verifiedpermissions:IsAuthorizedWithToken"
     },
     "vpc-lattice": {
       "BatchUpdateRule": "vpc-lattice:UpdateRule"
