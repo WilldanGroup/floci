@@ -415,6 +415,31 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The id of the stack at the top of the nesting {@code stack} is in, as DescribeStacks and ListStacks report
+     * a nested stack's RootId: the one recorded when it was created, or, for a nested stack recorded before roots
+     * were, the top of its parents still stored; the stack's own id for a root stack.
+     */
+    public String rootIdOf(Stack stack) {
+        if (stack.getParentId() == null) {
+            return stack.getStackId();
+        }
+        if (stack.getRootId() != null) {
+            return stack.getRootId();
+        }
+        Stack current = stack;
+        Set<String> seen = new HashSet<>();
+        while (current.getParentId() != null && seen.add(current.getStackId())) {
+            String parentId = current.getParentId();
+            Stack parent = stacks.values().stream().filter(s -> parentId.equals(s.getStackId())).findFirst().orElse(null);
+            if (parent == null) {
+                break;
+            }
+            current = parent;
+        }
+        return current.getStackId();
+    }
+
+    /**
      * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
      * resolve {@code UsePreviousValue} on an update before the stack lookup that
      * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
@@ -4777,6 +4802,7 @@ public class CloudFormationService implements ResourceProvider {
         if (childCreate) {
             childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setParentId(parentStack.getStackId());
+            childStack.setRootId(rootIdOf(parentStack));
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);
         } else {

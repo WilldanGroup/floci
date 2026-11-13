@@ -46,6 +46,8 @@ public class Stack {
     private String statusReason;
     /** The stack that nests this one; null for a root stack. */
     private String parentId;
+    /** The stack at the top of the nesting this one is in, as AWS reports RootId; null for a root stack. */
+    private String rootId;
     /**
      * The ClientRequestToken of this stack's current operation, null when it was given none. A nested
      * stack never has one. Set before the operation's first record and read on its worker thread.
@@ -108,6 +110,8 @@ public class Stack {
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
     public String getParentId() { return parentId; }
     public void setParentId(String parentId) { this.parentId = parentId; }
+    public String getRootId() { return rootId; }
+    public void setRootId(String rootId) { this.rootId = rootId; }
     @JsonIgnore
     public String getClientRequestToken() { return clientRequestToken; }
     @JsonIgnore

@@ -24,7 +24,7 @@ changing credentials already issued.
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `DescribeStacks` | Get stack status, parameters, and outputs |
+| `DescribeStacks` | Get stack status, parameters, and outputs, and a nested stack's `ParentId` and `RootId` (see [Nested Stacks](#nested-stacks)) |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources, keeping those named in `RetainResources` once a delete has failed (see [Deletion Policies](#deletion-policies)) |
@@ -41,7 +41,7 @@ changing credentials already issued.
 | `GetTemplate` | Retrieve the template body |
 | `GetTemplateSummary` | Summarize a template's Parameters, Resources and Transform sections, by StackName, TemplateBody or TemplateURL |
 | `ValidateTemplate` | Refuses a body that is no template (see [Template format](#template-format)) and a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
-| `ListStacks` | List stacks by status |
+| `ListStacks` | List stacks by status, a nested stack's summary with its `ParentId` and `RootId` (see [Nested Stacks](#nested-stacks)) |
 | `ListExports` | - |
 | `SetStackPolicy` | Store a stack policy given as `StackPolicyBody` or `StackPolicyURL`; only its structure is checked, and the policy is not enforced. `CreateStack` stores its policy and `UpdateStack` applies its policy once the update completes |
 | `GetStackPolicy` | Return the stored stack policy as submitted, including for a deleted stack by stack id |
@@ -456,6 +456,14 @@ The CDK then deletes that change set, and before its next deploy deletes it agai
 `DeleteChangeSet` for a change set the stack does not have succeeds, as on AWS, whatever the stack's
 status, named with its stack or by its ARN alone; a `StackName` that names no stack is still a
 `ValidationError`.
+
+## Nested Stacks
+
+A nested stack names the stack that nests it and the top-level stack it belongs to, as the CloudFormation API
+Reference's `StackSummary` and `Stack` describe them: `ListStacks` and `DescribeStacks` answer a nested stack with
+`ParentId`, the stack ID of its direct parent, and `RootId`, the stack ID of the top-level stack, at any depth, so a
+stack nested in a root carries the root's ID as both. A root stack carries neither element, so a reader telling root
+stacks from nested ones by `ParentId` reads them as on AWS.
 
 ## Lambda Stack Updates
 

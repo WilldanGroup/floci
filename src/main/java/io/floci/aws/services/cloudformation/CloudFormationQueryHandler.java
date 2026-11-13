@@ -657,6 +657,7 @@ public class CloudFormationQueryHandler {
             if (s.getDeletionTime() != null) {
                 xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
             }
+            nesting(xml, s);
             xml.end("member");
         }
         xml.end("StackSummaries").end("ListStacksResult")
@@ -688,6 +689,17 @@ public class CloudFormationQueryHandler {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /**
+     * A nested stack's ParentId, the stack that nests it, and RootId, the top of its nesting, as AWS reports them
+     * on a Stack and a StackSummary; a root stack carries neither.
+     */
+    private void nesting(XmlBuilder xml, Stack s) {
+        if (s.getParentId() != null) {
+            xml.elem("ParentId", s.getParentId());
+            xml.elem("RootId", cfnService.rootIdOf(s));
+        }
+    }
+
     private String stackToXml(Stack s) {
         XmlBuilder xml = new XmlBuilder().start("member")
                 .elem("StackId", s.getStackId())
@@ -704,6 +716,7 @@ public class CloudFormationQueryHandler {
         if (s.getStatusReason() != null) {
             xml.elem("StackStatusReason", s.getStatusReason());
         }
+        nesting(xml, s);
         xml.start("Capabilities");
         for (String cap : s.getCapabilities()) {
             xml.elem("member", cap);
