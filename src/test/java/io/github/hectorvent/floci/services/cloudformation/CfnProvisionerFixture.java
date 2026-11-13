@@ -81,6 +81,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.IamManage
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamOidcProviderCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRolePolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamUserCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IotAuthorizerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IotCfnProvisioner;
@@ -407,6 +408,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new IamAccessKeyCfnProvisioner(iamService));
                 discovered.add(new IamInstanceProfileCfnProvisioner(iamService));
                 discovered.add(new IamPolicyCfnProvisioner(iamService));
+                discovered.add(new IamRolePolicyCfnProvisioner(iamService));
                 discovered.add(new IamManagedPolicyCfnProvisioner(iamService));
                 discovered.add(new IamOidcProviderCfnProvisioner(iamService));
             }
