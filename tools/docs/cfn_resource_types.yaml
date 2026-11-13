@@ -46,6 +46,7 @@ order:
   - AWS::CodeArtifact
   - AWS::Batch
   - AWS::Cognito
+  - AWS::VerifiedPermissions
   - AWS::CertificateManager
   - AWS::Events
   - AWS::Scheduler
@@ -87,6 +88,7 @@ type_order:
   AWS::DynamoDB: [Table, GlobalTable]
   AWS::Lambda: [Function, LayerVersion, EventSourceMapping, Version, Alias, Permission]
   AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
+  AWS::VerifiedPermissions: [PolicyStore, PolicyTemplate, Policy]
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
   AWS::KMS: [Key, ReplicaKey, Alias]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
@@ -179,6 +181,7 @@ service_labels:
   AWS::ServiceDiscovery: Cloud Map
   AWS::StepFunctions: Step Functions
   AWS::Transfer: Transfer Family
+  AWS::VerifiedPermissions: Verified Permissions
   AWS::WAFv2: WAFv2
   Custom: CloudFormation
 

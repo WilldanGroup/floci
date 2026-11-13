@@ -117,6 +117,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.TransferCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.VerifiedPermissionsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WaitConditionCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WaitConditionHandleCfnProvisioner;
@@ -175,6 +176,7 @@ import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.transfer.TransferService;
+import io.github.hectorvent.floci.services.verifiedpermissions.VerifiedPermissionsService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 
 import java.util.ArrayList;
@@ -219,6 +221,7 @@ final class CfnProvisionerFixture {
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
+        private VerifiedPermissionsService verifiedPermissionsService;
         private SecretsManagerService secretsManagerService;
         private EventBridgeService eventBridgeService;
         private ApiGatewayService apiGatewayService;
@@ -358,6 +361,9 @@ final class CfnProvisionerFixture {
             }
             if (kmsService != null) {
                 discovered.add(new KmsCfnProvisioner(kmsService));
+            }
+            if (verifiedPermissionsService != null) {
+                discovered.add(new VerifiedPermissionsCfnProvisioner(verifiedPermissionsService));
             }
             if (ecrService != null) {
                 discovered.add(new EcrCfnProvisioner(ecrService));
@@ -615,6 +621,11 @@ final class CfnProvisionerFixture {
 
         public Builder kms(KmsService v) {
             this.kmsService = v;
+            return this;
+        }
+
+        public Builder verifiedPermissions(VerifiedPermissionsService v) {
+            this.verifiedPermissionsService = v;
             return this;
         }
 
