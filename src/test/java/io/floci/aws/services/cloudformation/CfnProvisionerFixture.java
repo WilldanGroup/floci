@@ -82,6 +82,7 @@ import io.floci.aws.services.cloudformation.provisioners.IamInstanceProfileCfnPr
 import io.floci.aws.services.cloudformation.provisioners.IamManagedPolicyCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.IamPolicyCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.IamRoleCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.IamRolePolicyCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.IamUserCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.IotAuthorizerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.IotCfnProvisioner;
@@ -412,6 +413,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new IamAccessKeyCfnProvisioner(iamService));
                 discovered.add(new IamInstanceProfileCfnProvisioner(iamService));
                 discovered.add(new IamPolicyCfnProvisioner(iamService));
+                discovered.add(new IamRolePolicyCfnProvisioner(iamService));
                 discovered.add(new IamManagedPolicyCfnProvisioner(iamService));
             }
             if (eksService != null) {

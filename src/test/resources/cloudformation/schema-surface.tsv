@@ -125,6 +125,7 @@ AWS::IAM::InstanceProfile	Arn	InstanceProfileName,Path,Roles
 AWS::IAM::ManagedPolicy	AttachmentCount,CreateDate,DefaultVersionId,IsAttachable,PermissionsBoundaryUsageCount,PolicyArn,PolicyId,UpdateDate	Description,Groups,ManagedPolicyName,Path,PolicyDocument,Roles,Users
 AWS::IAM::Policy	Id	Groups,PolicyDocument,PolicyName,Roles,Users
 AWS::IAM::Role	Arn,RoleId	AssumeRolePolicyDocument,Description,ManagedPolicyArns,MaxSessionDuration,Path,PermissionsBoundary,Policies,RoleName,Tags
+AWS::IAM::RolePolicy		PolicyDocument,PolicyName,RoleName
 AWS::IAM::User	Arn	Groups,LoginProfile,ManagedPolicyArns,Path,PermissionsBoundary,Policies,Tags,UserName
 AWS::IoT::Authorizer	Arn	AuthorizerFunctionArn,AuthorizerName,EnableCachingForHttp,SigningDisabled,Status,Tags,TokenKeyName,TokenSigningPublicKeys
 AWS::IoT::DomainConfiguration	Arn,DomainType,ServerCertificates	ApplicationProtocol,AuthenticationType,AuthorizerConfig,ClientCertificateConfig,DomainConfigurationName,DomainConfigurationStatus,DomainName,ServerCertificateArns,ServerCertificateConfig,ServiceType,Tags,TlsConfig,ValidationCertificateArn

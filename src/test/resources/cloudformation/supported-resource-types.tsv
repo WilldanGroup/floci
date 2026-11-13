@@ -126,6 +126,7 @@ AWS::IAM::InstanceProfile	IamInstanceProfileCfnProvisioner
 AWS::IAM::ManagedPolicy	IamManagedPolicyCfnProvisioner
 AWS::IAM::Policy	IamPolicyCfnProvisioner
 AWS::IAM::Role	IamRoleCfnProvisioner
+AWS::IAM::RolePolicy	IamRolePolicyCfnProvisioner
 AWS::IAM::User	IamUserCfnProvisioner
 AWS::IoT::Authorizer	IotAuthorizerCfnProvisioner
 AWS::IoT::DomainConfiguration	IotDomainConfigurationCfnProvisioner

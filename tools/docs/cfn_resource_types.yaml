@@ -87,7 +87,7 @@ type_order:
   AWS::SNS: [Topic, Subscription]
   AWS::DynamoDB: [Table, GlobalTable]
   AWS::Lambda: [Function, LayerVersion, EventSourceMapping, Version, Alias, Permission]
-  AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
+  AWS::IAM: [Role, User, AccessKey, Policy, RolePolicy, ManagedPolicy, InstanceProfile]
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
   AWS::KMS: [Key, Alias]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
