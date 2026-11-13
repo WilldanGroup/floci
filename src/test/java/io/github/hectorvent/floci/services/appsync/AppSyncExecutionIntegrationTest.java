@@ -290,6 +290,97 @@ class AppSyncExecutionIntegrationTest {
             .body("errors", nullValue());
     }
 
+    /**
+     * AppSync serializes a resolver's answer to an AWSJSON field once more on the way out: a map is served as
+     * JSON text that parses to the map, and JSON text answered as a string is served as a string encoding it,
+     * one beginning {@code "{}, which a reader parses twice; each element of a list of AWSJSON the same way.
+     */
+    @Test
+    void aResolversAnswerToAnAwsJsonFieldIsServedSerializedOnceMore() {
+        String api = createApi("awsjson-" + UUID.randomUUID().toString().substring(0, 8));
+        String key = createApiKey(api);
+        startSchema(api, "type Query { asMap: AWSJSON, asText: AWSJSON, asList: [AWSJSON] }");
+        awaitSchemaSuccess(api);
+        noneDataSource(api);
+        noneResolver(api, "asMap", "$util.toJson({\"a\": 1})");
+        noneResolver(api, "asText", "$util.toJson($util.toJson({\"a\": 1}))");
+        noneResolver(api, "asList", "$util.toJson([{\"a\": 1}, $util.toJson({\"b\": 2})])");
+
+        given()
+            .header("x-api-key", key)
+            .contentType("application/json")
+            .body("{\"query\":\"{ asMap asText asList }\"}")
+        .when()
+            .post("/v1/apis/" + api + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.asMap", equalTo("{\"a\":1}"))
+            .body("data.asText", equalTo("\"{\\\"a\\\":1}\""))
+            .body("data.asList[0]", equalTo("{\"a\":1}"))
+            .body("data.asList[1]", equalTo("\"{\\\"b\\\":2}\""));
+    }
+
+    /**
+     * AppSync takes an AWSJSON variable as a string of JSON text alone and refuses a JSON object before any
+     * resolver runs; the text is parsed into maps and lists before the resolver sees it, so a resolver reads
+     * the argument's fields, and one echoing it answers the map, served as text.
+     */
+    @Test
+    void anAwsJsonVariableIsAStringParsedBeforeTheResolverRuns() {
+        String api = createApi("awsjson-var-" + UUID.randomUUID().toString().substring(0, 8));
+        String key = createApiKey(api);
+        startSchema(api, "type Query { echo(v: AWSJSON): AWSJSON, inner(v: AWSJSON): Int }");
+        awaitSchemaSuccess(api);
+        noneDataSource(api);
+        noneResolver(api, "echo", "$util.toJson($ctx.args.v)");
+        noneResolver(api, "inner", "$util.toJson($ctx.args.v.a)");
+
+        given()
+            .header("x-api-key", key)
+            .contentType("application/json")
+            .body("{\"query\":\"query Q($v: AWSJSON) { echo(v: $v) }\",\"variables\":{\"v\":{\"a\":1}}}")
+        .when()
+            .post("/v1/apis/" + api + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("data", nullValue())
+            .body("errors[0].errorType", equalTo("ValidationError"))
+            .body("errors[0].message", containsString("Variable 'v' has an invalid value"));
+
+        given()
+            .header("x-api-key", key)
+            .contentType("application/json")
+            .body("{\"query\":\"query Q($v: AWSJSON) { echo(v: $v) inner(v: $v) }\","
+                + "\"variables\":{\"v\":\"{\\\"a\\\":1}\"}}")
+        .when()
+            .post("/v1/apis/" + api + "/graphql")
+        .then()
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.echo", equalTo("{\"a\":1}"))
+            .body("data.inner", equalTo(1));
+    }
+
+    private static void noneDataSource(String api) {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"name\": \"none\", \"type\": \"NONE\"}")
+            .when().post("/v1/apis/" + api + "/datasources").then().statusCode(200);
+    }
+
+    /** A VTL unit resolver on the NONE data source whose answer is {@code responseTemplate}'s. */
+    private static void noneResolver(String api, String field, String responseTemplate) {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"dataSourceName\": \"none\", \"fieldName\": \"" + field + "\", \"typeName\": \"Query\","
+                + " \"requestMappingTemplate\": \"{\\\"version\\\":\\\"2018-05-29\\\",\\\"payload\\\":{}}\","
+                + " \"responseMappingTemplate\": " + quote(responseTemplate) + "}")
+            .when().post("/v1/apis/" + api + "/types/Query/resolvers").then().statusCode(200);
+    }
+
+    private static String quote(String s) {
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
     @Test
     void httpSubscriptionReturns200OperationNotSupported() {
         String subApi = createApi("sub-" + UUID.randomUUID().toString().substring(0, 8));
