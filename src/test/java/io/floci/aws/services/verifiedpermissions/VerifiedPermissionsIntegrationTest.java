@@ -171,6 +171,39 @@ class VerifiedPermissionsIntegrationTest {
                 .then().statusCode(400).body("__type", containsString("ResourceNotFoundException"));
     }
 
+    /**
+     * A static policy's principal and resource are the entities its scope names, which the store does not keep as
+     * it keeps a template-linked policy's slot values, so a filter on them reads the statement: a permit on
+     * {@code principal in Org::"Y"} is found by a filter on {@code Org::"Y"}, not by one on {@code User::"X"}, and
+     * its unconstrained resource by a filter for an unspecified one.
+     */
+    @Test
+    void listPolicies_findsAStaticPolicyByTheEntitiesInItsScope() {
+        String store = createStore("OFF", "DISABLED");
+        String policyId = givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store,
+                "definition", Map.of("static", Map.of("statement",
+                        "permit(principal in Org::\"Y\", action == Demo::Action::\"read\", resource);")))))
+                .then().statusCode(200).extract().path("policyId");
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store,
+                "definition", Map.of("static", Map.of("statement",
+                        "permit(principal == User::\"X\", action, resource == Doc::\"readme\");")))))
+                .then().statusCode(200);
+
+        givenAws("ListPolicies", objectJson(Map.of("policyStoreId", store, "filter", Map.of("principal",
+                        Map.of("identifier", Map.of("entityType", "Org", "entityId", "Y"))))))
+                .then().statusCode(200).body("policies.size()", equalTo(1))
+                .body("policies[0].policyId", equalTo(policyId))
+                .body("policies[0].principal.entityId", equalTo("Y"));
+        givenAws("ListPolicies", objectJson(Map.of("policyStoreId", store, "filter", Map.of("principal",
+                        Map.of("identifier", Map.of("entityType", "User", "entityId", "X")),
+                        "resource", Map.of("unspecified", true)))))
+                .then().statusCode(200).body("policies.size()", equalTo(0));
+        givenAws("ListPolicies", objectJson(Map.of("policyStoreId", store, "filter", Map.of("principal",
+                        Map.of("identifier", Map.of("entityType", "Org", "entityId", "Y")),
+                        "resource", Map.of("unspecified", true)))))
+                .then().statusCode(200).body("policies.size()", equalTo(1));
+    }
+
     @Test
     void strictStoreRejectsPoliciesUntilSchemaExists_andUpdateCannotChangeEffect() {
         String store = createStore("STRICT", "DISABLED");

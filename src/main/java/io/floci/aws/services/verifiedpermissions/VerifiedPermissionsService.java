@@ -430,8 +430,10 @@ public class VerifiedPermissionsService implements Resettable {
     public PaginatedResult<Policy> listPolicies(JsonNode request, String region) {
         PolicyStore store = getPolicyStore(requiredText(request, "policyStoreId"), region);
         JsonNode filter = request.get("filter");
+        boolean byScope = filter != null && (filter.has("principal") || filter.has("resource"));
         List<Policy> items = policies.scan(k -> k.startsWith(region + ":" + store.policyStoreId() + ":")).stream()
-                .filter(p -> matchesPolicyFilter(p, filter))
+                .filter(p -> matchesPolicyFilter(p, filter,
+                        byScope && "STATIC".equals(p.policyType()) ? policyMetadata(p, region) : null))
                 .sorted(Comparator.comparing(Policy::policyId)).toList();
         return Pagination.paginate(items, Policy::policyId, optionalInt(request, "maxResults"),
                 text(request, "nextToken", null), 10, 50, "ValidationException");
@@ -997,7 +999,13 @@ public class VerifiedPermissionsService implements Resettable {
 
     public record PolicyMetadata(List<EntityIdentifier> actions, EntityIdentifier principal, EntityIdentifier resource) {}
 
-    private static boolean matchesPolicyFilter(Policy policy, JsonNode filter) {
+    /**
+     * Whether the policy is one the filter asks for. A policy's principal and resource are the entities its scope
+     * names, which the store keeps only for a template-linked policy, as the values of its slots; a static policy's
+     * are read from its statement, as its list item reports them, and come in {@code scope} when the filter names a
+     * principal or a resource, so a filter on {@code Org::"Y"} finds {@code permit(principal in Org::"Y", ...)}.
+     */
+    private static boolean matchesPolicyFilter(Policy policy, JsonNode filter, PolicyMetadata scope) {
         if (filter == null || filter.isNull()) {
             return true;
         }
@@ -1007,10 +1015,12 @@ public class VerifiedPermissionsService implements Resettable {
         if (filter.has("policyTemplateId") && !filter.path("policyTemplateId").asText().equals(policy.policyTemplateId())) {
             return false;
         }
-        if (filter.has("principal") && !matchesReference(policy.principal(), filter.get("principal"))) {
+        EntityIdentifier principal = scope == null ? policy.principal() : scope.principal();
+        EntityIdentifier resource = scope == null ? policy.resource() : scope.resource();
+        if (filter.has("principal") && !matchesReference(principal, filter.get("principal"))) {
             return false;
         }
-        return !filter.has("resource") || matchesReference(policy.resource(), filter.get("resource"));
+        return !filter.has("resource") || matchesReference(resource, filter.get("resource"));
     }
 
     private static boolean matchesReference(EntityIdentifier entity, JsonNode reference) {
