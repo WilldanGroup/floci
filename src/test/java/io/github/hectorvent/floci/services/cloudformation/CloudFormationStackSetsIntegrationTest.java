@@ -717,7 +717,8 @@ class CloudFormationStackSetsIntegrationTest {
         .then().statusCode(200)
             .extract().path("CreateStackInstancesResponse.CreateStackInstancesResult.OperationId");
 
-        // The rolled-back instance is INOPERABLE / FAILED...
+        // The rolled-back instance is OUTDATED / FAILED, naming the resource that failed as
+        // StackSets does...
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackInstance")
@@ -727,8 +728,10 @@ class CloudFormationStackSetsIntegrationTest {
             .header("Authorization", auth(ADMIN, "cloudformation"))
         .when().post("/")
         .then().statusCode(200)
+            .body(containsString("<Status>OUTDATED</Status>"))
             .body(containsString("<DetailedStatus>FAILED</DetailedStatus>"))
-            .body(containsString("<StatusReason>Missing TemplateURL</StatusReason>"));
+            .body(containsString("<StatusReason>ResourceLogicalId:Nested, ResourceType:AWS::CloudFormation::Stack,"
+                    + " ResourceStatusReason:Missing TemplateURL</StatusReason>"));
 
         // ...so the operation reports FAILED rather than a false SUCCEEDED.
         given()
@@ -745,7 +748,7 @@ class CloudFormationStackSetsIntegrationTest {
     /**
      * An instance whose stack rolled back is terminal, and the single-stack engine refuses to
      * update it. That is one instance failing, not a malformed request: UpdateStackSet still
-     * answers, leaves the instance INOPERABLE, and reports the operation FAILED. Letting the
+     * answers, leaves the instance OUTDATED, and reports the operation FAILED. Letting the
      * refusal out would fail the whole call with a 400 and update no instance at all.
      */
     @Test
@@ -794,7 +797,7 @@ class CloudFormationStackSetsIntegrationTest {
         .then().statusCode(200)
             .body(containsString("<Status>FAILED</Status>"));
 
-        // The instance is kept and still INOPERABLE, carrying the refusal as its reason.
+        // The instance is kept and still OUTDATED, carrying the refusal as its reason.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackInstance")

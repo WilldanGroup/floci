@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
+import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperationPreferences;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.regex.Pattern;
@@ -232,6 +234,19 @@ public class StackSetService implements PassedRoleLookup {
                                                          Boolean autoDeploymentEnabled,
                                                          Boolean retainStacksOnAccountRemoval,
                                                          Boolean managedExecutionActive) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description, requestedOperationId,
+                autoDeploymentEnabled, retainStacksOnAccountRemoval, managedExecutionActive,
+                StackSetOperationPreferences.DEFAULT);
+    }
+
+    public synchronized StackSetOperation updateStackSet(String name, String templateBody,
+                                                         Map<String, String> parameters,
+                                                         List<String> capabilities, Map<String, String> tags,
+                                                         String description, String requestedOperationId,
+                                                         Boolean autoDeploymentEnabled,
+                                                         Boolean retainStacksOnAccountRemoval,
+                                                         Boolean managedExecutionActive,
+                                                         StackSetOperationPreferences preferences) {
         StackSet ss = getStackSetOrThrow(name);
         // Checked against the template and parameters the update leaves the stack set with, before
         // either is changed or an operation is recorded.
@@ -275,13 +290,15 @@ public class StackSetService implements PassedRoleLookup {
                 // An instance whose stack is terminal - a failed create that rolled back, or a phase
                 // some earlier operation abandoned - is one the single-stack engine refuses to update.
                 // That is one instance failing, not a malformed request: AWS leaves such an instance
-                // INOPERABLE, updates the rest, and reports the operation FAILED. Deploying into it
-                // anyway would raise the refusal out of here and fail the whole UpdateStackSet call
-                // with a 400, updating no instance at all.
+                // OUTDATED, "The associated stack failed during a CreateStackSet or UpdateStackSet
+                // operation" (CloudFormation API Reference, StackInstanceSummary), updates the rest,
+                // and counts it against the operation's failure tolerance. Deploying into it anyway
+                // would raise the refusal out of here and fail the whole UpdateStackSet call with a
+                // 400, updating no instance at all.
                 String stackStatus = cfnService.stackStatus(
                         inst.getStackName(), inst.getRegion(), inst.getAccount());
                 if (CloudFormationService.refusesUpdate(stackStatus)) {
-                    inst.setStatus("INOPERABLE");
+                    inst.setStatus("OUTDATED");
                     inst.setDetailedStatus("FAILED");
                     inst.setStatusReason("Stack instance is in " + stackStatus
                             + " state and can not be updated");
@@ -295,7 +312,7 @@ public class StackSetService implements PassedRoleLookup {
                 instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
                 deployed.add(updated);
             }
-            completeOperation(name, operationId, deriveOperationStatus(deployed));
+            completeOperation(name, operationId, deriveOperationStatus(deployed, preferences));
             return describeStackSetOperation(name, operationId);
         } catch (RuntimeException e) {
             completeOperation(name, operationId, "FAILED");
@@ -324,8 +341,15 @@ public class StackSetService implements PassedRoleLookup {
         return createStackInstances(name, accounts, regions, organizationalUnits, null);
     }
 
+    public StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  List<String> organizationalUnits, String requestedOperationId) {
+        return createStackInstances(name, accounts, regions, organizationalUnits, requestedOperationId,
+                StackSetOperationPreferences.DEFAULT);
+    }
+
     public synchronized StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions,
-                                                               List<String> organizationalUnits, String requestedOperationId) {
+                                                               List<String> organizationalUnits, String requestedOperationId,
+                                                               StackSetOperationPreferences preferences) {
         StackSet ss = getStackSetOrThrow(name);
         validateRegions(regions);
         List<String> directAccounts = accounts == null ? List.of() : accounts;
@@ -384,7 +408,7 @@ public class StackSetService implements PassedRoleLookup {
                     deployed.add(inst);
                 }
             }
-            completeOperation(name, operationId, deriveOperationStatus(deployed));
+            completeOperation(name, operationId, deriveOperationStatus(deployed, preferences));
             return describeStackSetOperation(name, operationId);
         } catch (RuntimeException e) {
             // An organizational unit that cannot be resolved, or an instance whose change set is
@@ -429,6 +453,13 @@ public class StackSetService implements PassedRoleLookup {
 
     public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
                                                   List<String> organizationalUnits, boolean retainStacks) {
+        return deleteStackInstances(name, accounts, regions, organizationalUnits, retainStacks,
+                StackSetOperationPreferences.DEFAULT);
+    }
+
+    public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  List<String> organizationalUnits, boolean retainStacks,
+                                                  StackSetOperationPreferences preferences) {
         StackSet stackSet = getStackSetOrThrow(name);
         validateRegions(regions);
         List<String> directAccounts = accounts == null ? List.of() : accounts;
@@ -500,7 +531,7 @@ public class StackSetService implements PassedRoleLookup {
             instances.delete(key);
             results.add(inst);
         }
-        String operationStatus = deriveOperationStatus(results);
+        String operationStatus = deriveOperationStatus(results, preferences);
         if ("SUCCEEDED".equals(operationStatus) && !requestedDeploymentTargets.isEmpty()) {
             removeDeploymentTargetRegions(name, requestedDeploymentTargets, requestedRegions);
         }
@@ -711,9 +742,15 @@ public class StackSetService implements PassedRoleLookup {
         if (nothingToChange) {
             inst.setDetailedStatus("SUCCEEDED");
         } else if (!"CREATE_COMPLETE".equals(stackStatus) && !"UPDATE_COMPLETE".equals(stackStatus)) {
-            inst.setStatus("INOPERABLE");
+            // OUTDATED, "The associated stack failed during a CreateStackSet or UpdateStackSet
+            // operation" (CloudFormation API Reference, StackInstanceSummary); INOPERABLE is a failed
+            // DeleteStackInstances's. The reason names the resource that failed as StackSets does:
+            // "ResourceLogicalId:Wait, ResourceType:AWS::CloudFormation::WaitCondition,
+            // ResourceStatusReason:WaitCondition timed out. ..." (read on a real account, us-east-2,
+            // 2026-11-19).
+            inst.setStatus("OUTDATED");
             inst.setDetailedStatus("FAILED");
-            inst.setStatusReason(stacks.isEmpty() ? null : CloudFormationService.failureCause(stacks.get(0)));
+            inst.setStatusReason(stacks.isEmpty() ? null : CloudFormationService.instanceFailureReason(stacks.get(0)));
         } else {
             inst.setDetailedStatus("SUCCEEDED");
         }
@@ -737,14 +774,28 @@ public class StackSetService implements PassedRoleLookup {
     }
 
     /**
-     * An operation is FAILED if any of its instances did not deploy cleanly; otherwise SUCCEEDED.
-     * Without this, a failed (INOPERABLE) instance would still report SUCCEEDED to anything polling
-     * {@code DescribeStackSetOperation}.
+     * An operation is FAILED where, in some Region, more of its instances failed than its
+     * preferences tolerate there; otherwise SUCCEEDED, a failed instance within the tolerance
+     * included: "The operation finished without exceeding the failure tolerance for the operation"
+     * (CloudFormation User Guide, StackSets concepts). With no preferences the tolerance is 0, so
+     * any failed instance fails the operation, rather than report a false SUCCEEDED to anything
+     * polling {@code DescribeStackSetOperation}.
      */
-    private static String deriveOperationStatus(List<StackInstance> deployedInstances) {
-        boolean anyFailed = deployedInstances.stream()
-                .anyMatch(i -> "FAILED".equals(i.getDetailedStatus()));
-        return anyFailed ? "FAILED" : "SUCCEEDED";
+    static String deriveOperationStatus(List<StackInstance> deployedInstances,
+                                        StackSetOperationPreferences preferences) {
+        StackSetOperationPreferences tolerance = preferences == null
+                ? StackSetOperationPreferences.DEFAULT : preferences;
+        Map<String, int[]> byRegion = new TreeMap<>();
+        for (StackInstance instance : deployedInstances) {
+            int[] counts = byRegion.computeIfAbsent(String.valueOf(instance.getRegion()), region -> new int[2]);
+            counts[0]++;
+            if ("FAILED".equals(instance.getDetailedStatus())) {
+                counts[1]++;
+            }
+        }
+        boolean exceeded = byRegion.values().stream()
+                .anyMatch(counts -> counts[1] > tolerance.toleratedFailures(counts[0]));
+        return exceeded ? "FAILED" : "SUCCEEDED";
     }
 
     /**

@@ -2823,31 +2823,55 @@ public class CloudFormationService implements ResourceProvider, StoredResourceAr
 
     /**
      * The stack's reason, or, while that is still the rollback summary, the failed resource's own
-     * message, which is what a stack set instance reports as the cause.
+     * message.
      */
     static String failureCause(Stack stack) {
+        StackEvent failed = failedResourceEvent(stack);
+        return failed != null ? failed.getResourceStatusReason() : stack.getStatusReason();
+    }
+
+    /**
+     * What a stack set instance reports as the cause of its stack's failure: the failed resource,
+     * named as StackSets names it, "ResourceLogicalId:Wait,
+     * ResourceType:AWS::CloudFormation::WaitCondition, ResourceStatusReason:WaitCondition timed
+     * out. Received 0 conditions when expecting 1." (an instance's {@code StatusReason}, read on a
+     * real account, us-east-2, 2026-11-19), or the stack's own reason where no resource failed.
+     */
+    static String instanceFailureReason(Stack stack) {
+        StackEvent failed = failedResourceEvent(stack);
+        return failed == null ? stack.getStatusReason()
+                : "ResourceLogicalId:" + failed.getLogicalResourceId()
+                        + ", ResourceType:" + failed.getResourceType()
+                        + ", ResourceStatusReason:" + failed.getResourceStatusReason();
+    }
+
+    /**
+     * The event of the resource whose failure started the stack's last rollback, while the stack's
+     * reason is still that rollback's summary; null otherwise.
+     */
+    private static StackEvent failedResourceEvent(Stack stack) {
         String reason = stack.getStatusReason();
         List<StackEvent> events = stack.eventsSnapshot();
         int rollbackStart = events.size() - 1;
         while (rollbackStart >= 0 && !isStackEvent(stack, events.get(rollbackStart), ROLLBACK_STARTS)) {
             if (isStackEvent(stack, events.get(rollbackStart), OPERATION_STARTS)) {
-                return reason;
+                return null;
             }
             rollbackStart--;
         }
         if (rollbackStart < 0 || !Objects.equals(reason, events.get(rollbackStart).getResourceStatusReason())) {
-            return reason;
+            return null;
         }
         for (int i = rollbackStart - 1; i >= 0; i--) {
             StackEvent event = events.get(i);
             if (isOwnEvent(stack, event)) {
-                return reason;
+                return null;
             }
             if ("CREATE_FAILED".equals(event.getResourceStatus()) || "UPDATE_FAILED".equals(event.getResourceStatus())) {
-                return event.getResourceStatusReason();
+                return event;
             }
         }
-        return reason;
+        return null;
     }
 
     private static boolean isStackEvent(Stack stack, StackEvent event, Set<String> statuses) {

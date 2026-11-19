@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
+import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperationPreferences;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -967,7 +968,8 @@ public class CloudFormationQueryHandler {
                     params.containsKey("AutoDeployment.RetainStacksOnAccountRemoval")
                             ? Boolean.parseBoolean(params.getFirst("AutoDeployment.RetainStacksOnAccountRemoval")) : null,
                     params.containsKey("ManagedExecution.Active")
-                            ? Boolean.parseBoolean(params.getFirst("ManagedExecution.Active")) : null);
+                            ? Boolean.parseBoolean(params.getFirst("ManagedExecution.Active")) : null,
+                    extractOperationPreferences(params));
             return operationResponse("UpdateStackSet", op.getOperationId());
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
@@ -990,7 +992,8 @@ public class CloudFormationQueryHandler {
                     extractList(params, "Accounts.member."),
                     resolveRegions(params, region),
                     extractList(params, "DeploymentTargets.OrganizationalUnitIds.member."),
-                    params.getFirst("OperationId"));
+                    params.getFirst("OperationId"),
+                    extractOperationPreferences(params));
             return operationResponse("CreateStackInstances", op.getOperationId());
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
@@ -1067,10 +1070,30 @@ public class CloudFormationQueryHandler {
                     extractList(params, "Accounts.member."),
                     extractList(params, "Regions.member."),
                     extractList(params, "DeploymentTargets.OrganizationalUnitIds.member."),
-                    Boolean.parseBoolean(params.getFirst("RetainStacks")));
+                    Boolean.parseBoolean(params.getFirst("RetainStacks")),
+                    extractOperationPreferences(params));
             return operationResponse("DeleteStackInstances", op.getOperationId());
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    /** The failure tolerance a stack set operation's {@code OperationPreferences} name, if any. */
+    private static StackSetOperationPreferences extractOperationPreferences(MultivaluedMap<String, String> params) {
+        return new StackSetOperationPreferences(
+                optionalInt(params, "OperationPreferences.FailureToleranceCount"),
+                optionalInt(params, "OperationPreferences.FailureTolerancePercentage"));
+    }
+
+    private static Integer optionalInt(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError", name + " must be an integer.", 400);
         }
     }
 
